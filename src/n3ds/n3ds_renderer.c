@@ -4943,17 +4943,22 @@ static void N3DSRenderer_drawTextCommon(Renderer* base, const char* text, float 
         renderer->activeSceneTarget == N3DS_SCENE_TARGET_TOP &&
         fabsf(renderer->viewScaleX - 0.5f) < 0.01f &&
         fabsf(renderer->viewScaleY - 0.5f) < 0.01f &&
-        x >= 400.0f && x <= 560.0f &&
+        x >= 400.0f && x <= 650.0f &&
         y >= 140.0f && y <= 210.0f;
 
     if (useReadableJapaneseBattleBubble) {
-        const float readabilityScale = 1.5f;
+        // Keep the vertical enlargement that made the Japanese strokes readable,
+        // but use a slightly tighter horizontal scale so longer Japanese lines
+        // remain inside the speech bubble. The previous x<=560 guard also left
+        // the last glyph of longer lines unscaled; cover the full observed range.
+        const float readabilityScaleX = 1.4f;
+        const float readabilityScaleY = 1.5f;
         const float textOriginX = 405.0f;
         const float textOriginY = 144.0f;
-        x = textOriginX + (x - textOriginX) * readabilityScale;
-        y = textOriginY + (y - textOriginY) * readabilityScale;
-        effectiveXScale *= readabilityScale;
-        effectiveYScale *= readabilityScale;
+        x = textOriginX + (x - textOriginX) * readabilityScaleX;
+        y = textOriginY + (y - textOriginY) * readabilityScaleY;
+        effectiveXScale *= readabilityScaleX;
+        effectiveYScale *= readabilityScaleY;
         renderer->textLinearFilterActive = true;
     }
     N3DSRenderer_traceBattleText(
