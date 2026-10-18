@@ -6514,23 +6514,34 @@ STUB_RETURN_ZERO(psn_get_leaderboard_score)
 static FILE* g_n3dsDialogueTraceFile = NULL;
 static uint32_t g_n3dsDialogueTraceCount = 0u;
 
-static bool builtin_shouldTrace3DSTopEnemyDialogue(VMContext* ctx) {
-    Runner* runner = ctx != NULL ? (Runner*) ctx->runner : NULL;
-    if (runner == NULL || runner->osType != OS_3DS || runner->renderer == NULL) return false;
-
-    // The first diagnostic required both flags simultaneously and produced no
-    // file on hardware. Trace when any relevant battle/top-GUI state is active
-    // so we can identify which path really renders the dialogue.
-    return runner->n3dsDrawBattleActive ||
-        runner->n3dsDrawHasTopEnemyDialogue ||
-        N3DSRenderer_isTopScreenGUIActive(runner->renderer);
-}
-
 static const char* builtin_getTraceObjectName(Runner* runner, Instance* inst) {
     if (runner == NULL || inst == NULL || runner->dataWin == NULL) return "<none>";
     if (inst->objectIndex < 0 || (uint32_t) inst->objectIndex >= runner->dataWin->objt.count) return "<invalid>";
     const char* name = runner->dataWin->objt.objects[inst->objectIndex].name;
     return name != NULL ? name : "<unnamed>";
+}
+
+static bool builtin_traceObjectLooksDialogueRelated(Runner* runner, Instance* inst) {
+    const char* name = builtin_getTraceObjectName(runner, inst);
+    if (name == NULL) return false;
+    return strstr(name, "writer") != NULL ||
+        strstr(name, "WRITER") != NULL ||
+        strstr(name, "blcon") != NULL ||
+        strstr(name, "flowey") != NULL ||
+        strstr(name, "dialog") != NULL ||
+        strstr(name, "text") != NULL;
+}
+
+static bool builtin_shouldTrace3DSTopEnemyDialogue(VMContext* ctx) {
+    Runner* runner = ctx != NULL ? (Runner*) ctx->runner : NULL;
+    if (runner == NULL || runner->osType != OS_3DS || runner->renderer == NULL) return false;
+
+    Instance* inst = ctx->currentInstance != NULL ? (Instance*) ctx->currentInstance : NULL;
+    if (builtin_traceObjectLooksDialogueRelated(runner, inst)) return true;
+
+    return runner->n3dsDrawBattleActive ||
+        runner->n3dsDrawHasTopEnemyDialogue ||
+        N3DSRenderer_isTopScreenGUIActive(runner->renderer);
 }
 
 static FILE* builtin_get3DSDialogueTraceFile(void) {
@@ -6593,7 +6604,16 @@ static void builtin_trace3DSDialogueText(
     float y,
     float dialogueScale
 ) {
-    if (!builtin_shouldTrace3DSTopEnemyDialogue(ctx) ||
+    bool containsNonAscii = false;
+    if (text != NULL) {
+        for (const unsigned char* p = (const unsigned char*) text; *p != '\0'; ++p) {
+            if (*p >= 0x80u) {
+                containsNonAscii = true;
+                break;
+            }
+        }
+    }
+    if ((!containsNonAscii && !builtin_shouldTrace3DSTopEnemyDialogue(ctx)) ||
         g_n3dsDialogueTraceCount >= N3DS_DIALOGUE_TRACE_LIMIT) return;
 
     Runner* runner = (Runner*) ctx->runner;
@@ -6732,6 +6752,9 @@ static RValue builtin_drawSpriteStretched(VMContext* ctx, RValue* args, MAYBE_UN
         subimg = (int32_t) ((Instance*) ctx->currentInstance)->imageIndex;
     }
 
+#ifdef __3DS__
+    builtin_trace3DSDialogueSprite(ctx, "draw_sprite_stretched", spriteIndex, subimg, x, y, w, h);
+#endif
     Renderer_drawSpriteStretched(runner->renderer, spriteIndex, subimg, x, y, w, h, 0xFFFFFF, runner->renderer->drawAlpha);
     return RValue_makeUndefined();
 }
@@ -6753,6 +6776,9 @@ static RValue builtin_drawSpriteStretchedExt(VMContext* ctx, RValue* args, MAYBE
         subimg = (int32_t) ((Instance*) ctx->currentInstance)->imageIndex;
     }
 
+#ifdef __3DS__
+    builtin_trace3DSDialogueSprite(ctx, "draw_sprite_stretched_ext", spriteIndex, subimg, x, y, w, h);
+#endif
     Renderer_drawSpriteStretched(runner->renderer, spriteIndex, subimg, x, y, w, h, color, alpha);
     return RValue_makeUndefined();
 }
@@ -6775,6 +6801,9 @@ static RValue builtin_drawSpritePart(VMContext* ctx, RValue* args, MAYBE_UNUSED 
         subimg = (int32_t) ((Instance*) ctx->currentInstance)->imageIndex;
     }
 
+#ifdef __3DS__
+    builtin_trace3DSDialogueSprite(ctx, "draw_sprite_part", spriteIndex, subimg, x, y, 1.0f, 1.0f);
+#endif
     Renderer_drawSpritePart(runner->renderer, spriteIndex, subimg, left, top, width, height, x, y);
     return RValue_makeUndefined();
 }
@@ -6812,6 +6841,9 @@ static RValue builtin_drawSpritePartExt(VMContext* ctx, RValue* args, MAYBE_UNUS
     }
 #endif
 
+#ifdef __3DS__
+    builtin_trace3DSDialogueSprite(ctx, "draw_sprite_part_ext", spriteIndex, subimg, x, y, xscale, yscale);
+#endif
     Renderer_drawSpritePartExt(runner->renderer, spriteIndex, subimg, left, top, width, height, x, y, xscale, yscale, 0.0f, 0.0f, 0.0f, color, alpha);
     return RValue_makeUndefined();
 }
