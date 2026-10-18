@@ -7,7 +7,7 @@ param(
     [string]$BuildDir = "build\n3ds-cia",
     [ValidateSet("Release", "Debug", "RelWithDebInfo", "MinSizeRel")]
     [string]$Configuration = "Release",
-    [string]$AssetDir = "build\game-assets\current",
+    [string]$AssetDir = "",
 
     [string]$Preprocessor = "",
     [string]$Tex3ds = "",
