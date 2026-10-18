@@ -4928,8 +4928,6 @@ static void N3DSRenderer_drawTextCommon(Renderer* base, const char* text, float 
     Font* font = &dw->font.fonts[base->drawFont];
     float effectiveXScale = xscale * font->scaleX;
     float effectiveYScale = yscale * font->scaleY;
-    float originalEffectiveXScale = effectiveXScale;
-    float originalEffectiveYScale = effectiveYScale;
 
     // Hardware trace (2026-10-18) showed Japanese battle dialogue is often
     // rendered through the 640x480 battle view at exactly 0.5x on the 3DS top
@@ -4960,129 +4958,49 @@ static void N3DSRenderer_drawTextCommon(Renderer* base, const char* text, float 
         renderer->textLinearFilterActive = true;
     }
 
-    // UNDERTALE sometimes deliberately scales a Japanese glyph to 2x/3x for
-    // emphasis. The hardware trace shows these calls are not limited to the
-    // half-resolution battle view, so cap transformed Japanese top-screen text
-    // independently of viewScale. Position is left untouched, so shake/typewriter
-    // effects continue to behave as authored.
+    // The earlier full hardware trace captured the exact oversized Japanese
+    // emphasis animation: fnt_ja_maintext renders a single UTF-8 glyph while
+    // xscale/yscale ramp from about 1.0 to 3.4. A later narrow diagnostic gated
+    // on scene-target state produced no records, so do not make this correction
+    // depend on activeSceneTarget. Limit it to transformed single-glyph
+    // fnt_ja_maintext calls instead; normal dialogue and shake-only movement
+    // remain untouched.
     bool useJapaneseTopScreenScaleCap =
         font->name != NULL &&
-        strncmp(font->name, "fnt_ja_", 7) == 0 &&
-        renderer->activeSceneTarget == N3DS_SCENE_TARGET_TOP &&
-        (fabsf(xscale) > 1.5f || fabsf(yscale) > 1.5f);
+        strcmp(font->name, "fnt_ja_maintext") == 0 &&
+        text != NULL &&
+        strlen(text) <= 4u &&
+        (fabsf(xscale) > 1.05f || fabsf(yscale) > 1.05f);
 
     if (useJapaneseTopScreenScaleCap) {
-        // Hardware trace of UNDERTALE's single-glyph emphasis animation showed
-        // that the game moves the glyph while increasing scale. The first
-        // reprojection at 1.25x still left the lower edge outside the bubble.
-        // 1.10x preserves a visible emphasis while giving the glyph enough
-        // vertical room; the trace-based reprojection below also moves it upward.
-        const float maxPhysicalScale = 1.10f;
-        float absViewScaleX = fabsf(renderer->viewScaleX);
-        float absViewScaleY = fabsf(renderer->viewScaleY);
-        if (absViewScaleX < 0.001f) absViewScaleX = 1.0f;
-        if (absViewScaleY < 0.001f) absViewScaleY = 1.0f;
-
+        const float cappedArgScale = 1.10f;
         float originalArgScale = fmaxf(fabsf(xscale), fabsf(yscale));
-        float maxEffectiveXScale = maxPhysicalScale / absViewScaleX;
-        float maxEffectiveYScale = maxPhysicalScale / absViewScaleY;
-        float cappedArgScale = originalArgScale;
 
-        if (fabsf(effectiveXScale) > maxEffectiveXScale) {
-            effectiveXScale = copysignf(maxEffectiveXScale, effectiveXScale);
-            if (font->scaleX != 0.0f) {
-                cappedArgScale = fminf(cappedArgScale, maxEffectiveXScale / fabsf(font->scaleX));
-            }
-        }
-        if (fabsf(effectiveYScale) > maxEffectiveYScale) {
-            effectiveYScale = copysignf(maxEffectiveYScale, effectiveYScale);
-            if (font->scaleY != 0.0f) {
-                cappedArgScale = fminf(cappedArgScale, maxEffectiveYScale / fabsf(font->scaleY));
-            }
-        }
+        // Preserve the sign of any transformed scale, but clamp the magnitude to
+        // the traced bubble-safe size. fnt_ja_maintext has font scale 1.0 in the
+        // captured UNDERTALE build, so this maps directly to effective scale.
+        effectiveXScale = copysignf(
+            fminf(fabsf(effectiveXScale), cappedArgScale * fabsf(font->scaleX)),
+            effectiveXScale
+        );
+        effectiveYScale = copysignf(
+            fminf(fabsf(effectiveYScale), cappedArgScale * fabsf(font->scaleY)),
+            effectiveYScale
+        );
 
-        // The captured fnt_ja_maintext emphasis sequence follows approximately
-        // x = 135.21 - 16.69*scale, y = 19.45 + 25.02*scale.
-        // Reproject a capped single glyph to the matching point on that path.
-        // This is deliberately limited to the large Japanese main-text glyph
-        // effect so normal dialogue and shake offsets remain untouched.
-        if (strcmp(font->name, "fnt_ja_maintext") == 0 &&
-            text != NULL &&
-            strlen(text) <= 4u &&
-            originalArgScale > cappedArgScale + 0.001f) {
-            float removedScale = originalArgScale - cappedArgScale;
-            x += 16.69f * removedScale;
-            y -= 25.02f * removedScale;
+        // The full trace shows the animation path is approximately:
+        //   x = 134.70 - 16.70 * scale
+        //   y =  19.44 + 25.02 * scale
+        // Reproject the capped glyph to the same authored path at scale 1.10.
+        // This corrects both the size and the downward drift that caused the
+        // glyph to escape the speech bubble.
+        if (originalArgScale > cappedArgScale) {
+            x = 134.70f - 16.70f * cappedArgScale;
+            y = 19.44f + 25.02f * cappedArgScale;
         }
 
         renderer->textLinearFilterActive = true;
     }
-    // Temporary narrow diagnostic for the remaining oversized single-kana
-    // effect. Unlike the earlier per-glyph trace, this writes at most 96 lines
-    // and only for transformed Japanese single-character text.
-    if (font->name != NULL &&
-        strncmp(font->name, "fnt_ja_", 7) == 0 &&
-        renderer->activeSceneTarget == N3DS_SCENE_TARGET_TOP &&
-        text != NULL &&
-        strlen(text) <= 4u &&
-        (fabsf(xscale) > 1.10f || fabsf(yscale) > 1.10f)) {
-        static uint32_t sEmphasisTraceCount = 0u;
-        if (sEmphasisTraceCount < 96u) {
-            int32_t tracePos = 0;
-            int32_t traceLen = (int32_t) strlen(text);
-            uint16_t traceCh = TextUtils_decodeUtf8(text, traceLen, &tracePos);
-            FontGlyph* traceGlyph = TextUtils_findGlyph(font, traceCh);
-            float traceCursorY = 0.0f;
-            float traceTotalHeight = TextUtils_lineStride(font);
-            if (base->drawValign == 1) traceCursorY -= traceTotalHeight * 0.5f;
-            else if (base->drawValign == 2) traceCursorY -= traceTotalHeight;
-            traceCursorY -= (float) font->ascenderOffset;
-            float traceDrawY = y + traceCursorY * effectiveYScale;
-            float traceDrawH = traceGlyph != NULL
-                ? (float) traceGlyph->sourceHeight * effectiveYScale
-                : 0.0f;
-
-            FILE* trace = fopen("sdmc:/3ds/cinnamon/emphasis_trace.log", "a");
-            if (trace != NULL) {
-                fprintf(
-                    trace,
-                    "%03lu font=%ld:%s bytes=",
-                    (unsigned long) sEmphasisTraceCount,
-                    (long) base->drawFont,
-                    font->name
-                );
-                for (int32_t bi = 0; bi < traceLen; ++bi) {
-                    fprintf(trace, "%02X", (unsigned int) (unsigned char) text[bi]);
-                }
-                fprintf(
-                    trace,
-                    " xy=%.2f,%.2f arg=%.3f,%.3f effOrig=%.3f,%.3f effFinal=%.3f,%.3f view=%.3f,%.3f glyph=%ux%u off=%d shift=%d asc=%d stride=%.2f drawY=%.2f drawH=%.2f bottom=%.2f\n",
-                    (double) x,
-                    (double) y,
-                    (double) xscale,
-                    (double) yscale,
-                    (double) originalEffectiveXScale,
-                    (double) originalEffectiveYScale,
-                    (double) effectiveXScale,
-                    (double) effectiveYScale,
-                    (double) renderer->viewScaleX,
-                    (double) renderer->viewScaleY,
-                    traceGlyph != NULL ? (unsigned int) traceGlyph->sourceWidth : 0u,
-                    traceGlyph != NULL ? (unsigned int) traceGlyph->sourceHeight : 0u,
-                    traceGlyph != NULL ? (int) traceGlyph->offset : 0,
-                    traceGlyph != NULL ? (int) traceGlyph->shift : 0,
-                    (int) font->ascenderOffset,
-                    (double) traceTotalHeight,
-                    (double) traceDrawY,
-                    (double) traceDrawH,
-                    (double) (traceDrawY + traceDrawH)
-                );
-                fclose(trace);
-            }
-            sEmphasisTraceCount++;
-        }
-    }
-
     N3DSRenderer_traceBattleText(
         renderer,
         base,
