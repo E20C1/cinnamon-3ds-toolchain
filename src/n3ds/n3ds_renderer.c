@@ -4959,26 +4959,24 @@ static void N3DSRenderer_drawTextCommon(Renderer* base, const char* text, float 
     }
 
     // UNDERTALE sometimes deliberately scales a Japanese glyph to 2x/3x for
-    // emphasis. In the half-resolution 3DS battle view those logical scales can
-    // still exceed the speech bubble. Preserve the effect, but cap the final
-    // physical scale to the native 1.0x screen size. Position is left untouched,
-    // so shake/typewriter effects continue to behave as authored.
+    // emphasis. The hardware trace shows these calls are not limited to the
+    // half-resolution battle view, so cap transformed Japanese top-screen text
+    // independently of viewScale. Position is left untouched, so shake/typewriter
+    // effects continue to behave as authored.
     bool useJapaneseTopScreenScaleCap =
         font->name != NULL &&
         strncmp(font->name, "fnt_ja_", 7) == 0 &&
         renderer->activeSceneTarget == N3DS_SCENE_TARGET_TOP &&
-        fabsf(renderer->viewScaleX - 0.5f) < 0.01f &&
-        fabsf(renderer->viewScaleY - 0.5f) < 0.01f &&
         (fabsf(xscale) > 1.5f || fabsf(yscale) > 1.5f);
 
     if (useJapaneseTopScreenScaleCap) {
-        // A physical 2x cap was ineffective here: at viewScale=0.5 the
-        // game's logical 3x glyph is only 1.5x physically, so it never hit that
-        // ceiling. Cap the final on-screen scale to 1.0x instead. Relative to
-        // the readability-tuned normal Japanese text (about 0.625x/0.75x
-        // physically), the emphasis still remains visibly larger without
-        // escaping the speech bubble.
-        const float maxPhysicalScale = 1.0f;
+        // Hardware trace shows the deliberate 2x/3x Japanese emphasis can
+        // also be emitted in a viewScale=1.0 pass (for example fnt_ja_maintext),
+        // so a half-resolution-only guard misses the exact oversized glyph seen
+        // in the Flowey bubble. Apply the cap to any top-screen Japanese
+        // transformed text. 1.25x keeps the emphasis obvious while leaving
+        // enough room for the glyph inside the speech bubble.
+        const float maxPhysicalScale = 1.25f;
         float absViewScaleX = fabsf(renderer->viewScaleX);
         float absViewScaleY = fabsf(renderer->viewScaleY);
         if (absViewScaleX < 0.001f) absViewScaleX = 1.0f;
