@@ -7214,6 +7214,9 @@ static void builtin_trace3DSBattleGlyphText(
     float yscale,
     float angle
 ) {
+    // v4 identified fnt_ja_plainbig as the oversized glyph path.
+    // Disable SD diagnostics during normal play.
+    return;
     static uint32_t traceCount = 0u;
     if (traceCount >= 48u || ctx == NULL || text == NULL) return;
 
@@ -7349,6 +7352,8 @@ static void builtin_trace3DSBattleGlyphSprite(
     float xscale,
     float yscale
 ) {
+    // Sprite probing is no longer needed after the font path was identified.
+    return;
     static uint32_t traceCount = 0u;
     if (traceCount >= 256u || ctx == NULL) return;
 
