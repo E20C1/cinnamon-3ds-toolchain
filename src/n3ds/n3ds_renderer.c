@@ -4971,11 +4971,11 @@ static void N3DSRenderer_drawTextCommon(Renderer* base, const char* text, float 
 
     if (useJapaneseTopScreenScaleCap) {
         // Hardware trace of UNDERTALE's single-glyph emphasis animation showed
-        // that the game moves the glyph while increasing scale. Simply clamping
-        // the scale leaves the original "large-scale" x/y behind, which is why
-        // the reduced glyph still hangs below the bubble. Clamp the size and
-        // compensate x/y back along the traced animation path.
-        const float maxPhysicalScale = 1.25f;
+        // that the game moves the glyph while increasing scale. The first
+        // reprojection at 1.25x still left the lower edge outside the bubble.
+        // 1.10x preserves a visible emphasis while giving the glyph enough
+        // vertical room; the trace-based reprojection below also moves it upward.
+        const float maxPhysicalScale = 1.10f;
         float absViewScaleX = fabsf(renderer->viewScaleX);
         float absViewScaleY = fabsf(renderer->viewScaleY);
         if (absViewScaleX < 0.001f) absViewScaleX = 1.0f;
