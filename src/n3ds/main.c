@@ -692,7 +692,7 @@ int main(int argc, char** argv) {
     // "the diagnostic binary was not actually launched / SD writes failed".
     FILE* dialogueTraceMarker = fopen("sdmc:/3ds/cinnamon/dialogue_trace.log", "wb");
     if (dialogueTraceMarker != NULL) {
-        fputs("Cinnamon 3DS dialogue trace v2: startup OK\n", dialogueTraceMarker);
+        fputs("Cinnamon 3DS dialogue trace v3: startup OK\n", dialogueTraceMarker);
         fflush(dialogueTraceMarker);
         fclose(dialogueTraceMarker);
     }
