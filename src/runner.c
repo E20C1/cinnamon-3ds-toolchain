@@ -1183,46 +1183,6 @@ static void fireDrawSubtype(Runner* runner, Drawable* drawables, int32_t drawabl
 
             N3DSResolvedDrawEvent* responderEvents = Runner_prepare3DSTopScreenGUIResponderList(runner, drawables, drawableCount, subtype, slot);
             int32_t responderCount = (int32_t) arrlen(responderEvents);
-            if (useTopEnemyDialogue2x) {
-                static uint32_t sDialogueReplayTraceCount = 0u;
-                if (sDialogueReplayTraceCount < 64u) {
-                    FILE* trace = fopen("sdmc:/3ds/cinnamon/dialogue_trace.log", "a");
-                    if (trace != NULL) {
-                        fprintf(
-                            trace,
-                            "REPLAY subtype=%ld gui=%ldx%ld responders=%ld battle=%d topDialogue=%d\n",
-                            (long) subtype,
-                            (long) guiW,
-                            (long) guiH,
-                            (long) responderCount,
-                            runner->n3dsDrawBattleActive ? 1 : 0,
-                            runner->n3dsDrawHasTopEnemyDialogue ? 1 : 0
-                        );
-                        repeat(responderCount, traceIndex) {
-                            N3DSResolvedDrawEvent* ev = &responderEvents[traceIndex];
-                            Instance* traceInst = ev->instance;
-                            const char* objName = "<none>";
-                            if (traceInst != NULL &&
-                                Runner_is3DSValidObjectIndex(runner, traceInst->objectIndex)) {
-                                const char* candidate = Runner_get3DSObjectName(runner, traceInst->objectIndex);
-                                if (candidate != NULL) objName = candidate;
-                            }
-                            fprintf(
-                                trace,
-                                "  RESP idx=%ld obj=%s inst=%ld code=%ld owner=%ld\n",
-                                (long) traceIndex,
-                                objName,
-                                traceInst != NULL ? (long) traceInst->instanceId : -1L,
-                                (long) ev->codeId,
-                                (long) ev->ownerObjectIndex
-                            );
-                        }
-                        fflush(trace);
-                        fclose(trace);
-                    }
-                    sDialogueReplayTraceCount++;
-                }
-            }
             repeat(responderCount, i) {
                 N3DSResolvedDrawEvent* resolvedEvent = &responderEvents[i];
                 Instance* inst = resolvedEvent->instance;
