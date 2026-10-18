@@ -106,3 +106,14 @@ After setup succeeds, continue with:
 ```powershell
 .\scripts\preprocess-game.ps1 -DataWin "C:\path\to\UNDERTALE\data.win"
 ```
+
+## citro2d / citro3d install location
+
+Current devkitPro packages install citro2d and citro3d into the libctru prefix. The bootstrap therefore verifies:
+
+```text
+C:\devkitPro\libctru\lib\libcitro2d.a
+C:\devkitPro\libctru\lib\libcitro3d.a
+```
+
+They are not expected under `C:\devkitPro\portlibs\3ds\lib` in this toolchain layout.
