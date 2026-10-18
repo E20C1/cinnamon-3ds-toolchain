@@ -52,16 +52,46 @@ function Resolve-Executable {
     return $null
 }
 
-$cmake = Resolve-Executable `
-    -ExplicitPath $CMakeExe `
-    -CommandNames @("cmake.exe", "cmake") `
-    -FallbackPaths @(
+function Resolve-HostCMake {
+    param([string]$ExplicitPath)
+
+    if ($ExplicitPath) {
+        return Resolve-Executable -ExplicitPath $ExplicitPath -CommandNames @() -FallbackPaths @()
+    }
+
+    $nativeCandidates = @(
         "C:\Program Files\CMake\bin\cmake.exe",
-        "C:\devkitPro\msys2\usr\bin\cmake.exe"
+        "C:\Program Files (x86)\CMake\bin\cmake.exe"
     )
 
+    foreach ($path in $nativeCandidates) {
+        if (Test-Path -LiteralPath $path -PathType Leaf) {
+            return (Resolve-Path -LiteralPath $path).Path
+        }
+    }
+
+    $commands = @(Get-Command cmake.exe, cmake -All -ErrorAction SilentlyContinue)
+    foreach ($command in $commands) {
+        if (-not $command) { continue }
+        $source = $command.Source
+        if ($source -and $source -notmatch '(?i)\\devkitPro\\msys2\\') {
+            return $source
+        }
+    }
+
+    return $null
+}
+
+$cmake = Resolve-HostCMake -ExplicitPath $CMakeExe
+
 if (-not $cmake) {
-    throw "CMake was not found. Install CMake or pass -CMakeExe <path>."
+    throw @"
+A native Windows CMake executable was not found.
+
+The devkitPro-bundled MSYS2 CMake is intentionally not used for host builds
+because it interprets native C:\... paths as MSYS paths. Install Kitware CMake
+or pass -CMakeExe <native-windows-cmake.exe>.
+"@
 }
 
 $compiler = Resolve-Executable `
