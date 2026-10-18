@@ -111,6 +111,8 @@ On Windows, build from PowerShell with:
 .\build-windows-n3ds.ps1
 ```
 
+For this fork, the Windows wrapper defaults to embedding the locally preprocessed assets from `build/game-assets/current` and writes a reproducibility manifest to `build/repro/n3ds-build.json`. A double-click launcher is also available as `build-new3ds.cmd`. See `docs/N3DS_BUILD.md` for the full workflow.
+
 
 You can also use the repository Makefile on Linux or from an MSYS2/devkitPro shell on Windows:
 
