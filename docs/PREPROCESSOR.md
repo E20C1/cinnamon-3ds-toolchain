@@ -112,3 +112,21 @@ It remains a behavioral reference, not the canonical build input for this fork. 
 The wrapper is intentionally named `preprocess-game.ps1`, not `preprocess-undertale.ps1`, because the underlying format work is not inherently limited to one title.
 
 That does not establish compatibility with arbitrary GameMaker games. The inherited preprocessor and runner contain UNDERTALE-oriented conveniences, and runtime compatibility still depends on bytecode version, GML/API coverage, extensions, resource formats, memory use, rendering behavior, and New 3DS hardware limits.
+
+## CI verification
+
+At repository commit `dc6ea10ba8cd52fbf61814f19800d998471fecf0`, GitHub Actions run `39103549222` completed successfully on both configured jobs:
+
+- Linux configured and built `tools/n3ds-preprocess` from source.
+- Windows parsed both PowerShell wrappers without syntax errors and built the preprocessor through `scripts/build-preprocessor.ps1`.
+
+The earlier Linux source build in run `39103498709` produced SHA-256:
+
+```text
+3821cfbad0f88c5b6e324c3f07a74fc8f7a423e9d8aad11d8848d115f76a4159
+```
+
+That hash is evidence for that specific GitHub-hosted build environment, not a universal expected hash across compilers or toolchain revisions.
+
+Milestone 1 still requires a local conversion of the user's legally obtained `data.win` with devkitPro `tex3ds`; CI intentionally does not contain proprietary game data.
+
