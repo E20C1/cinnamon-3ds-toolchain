@@ -6564,6 +6564,8 @@ static void builtin_trace3DSDialogueSprite(
     float xscale,
     float yscale
 ) {
+    // Hardware diagnosis complete; disable per-draw SD logging.
+    return;
     if (!builtin_shouldTrace3DSTopEnemyDialogue(ctx) ||
         g_n3dsDialogueTraceCount >= N3DS_DIALOGUE_TRACE_LIMIT) return;
 
@@ -6604,6 +6606,8 @@ static void builtin_trace3DSDialogueText(
     float y,
     float dialogueScale
 ) {
+    // Hardware diagnosis complete; disable per-glyph SD logging.
+    return;
     bool containsNonAscii = false;
     if (text != NULL) {
         for (const unsigned char* p = (const unsigned char*) text; *p != '\0'; ++p) {
