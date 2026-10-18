@@ -477,7 +477,12 @@ elseif(PLATFORM STREQUAL "n3ds")
     target_link_libraries(butterscotch PRIVATE citro2d citro3d ctru m)
     set_target_properties(butterscotch PROPERTIES OUTPUT_NAME cinnamon)
 
-    set(N3DS_ROMFS_DIR "${CMAKE_SOURCE_DIR}/resources/3ds/romfs")
+    set(
+        N3DS_ROMFS_DIR
+        "${CMAKE_SOURCE_DIR}/resources/3ds/romfs"
+        CACHE PATH
+        "Directory packaged at the root of the 3DSX RomFS"
+    )
     set(N3DS_SMDH_FILE "${CMAKE_CURRENT_BINARY_DIR}/cinnamon.default.smdh")
     ctr_generate_smdh(
         OUTPUT "${N3DS_SMDH_FILE}"
