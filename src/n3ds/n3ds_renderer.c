@@ -4957,6 +4957,35 @@ static void N3DSRenderer_drawTextCommon(Renderer* base, const char* text, float 
         effectiveYScale *= readabilityScaleY;
         renderer->textLinearFilterActive = true;
     }
+
+    // UNDERTALE sometimes deliberately scales a Japanese glyph to 2x/3x for
+    // emphasis. On the 3DS top screen the 3x case can exceed the speech bubble
+    // even though the effect is valid on the original PC viewport. Preserve the
+    // effect, but cap the final physical scale to 2x. Position is left untouched,
+    // so shake/typewriter effects continue to behave as authored.
+    bool useJapaneseTopScreenScaleCap =
+        font->name != NULL &&
+        strncmp(font->name, "fnt_ja_", 7) == 0 &&
+        renderer->activeSceneTarget == N3DS_SCENE_TARGET_TOP &&
+        (fabsf(xscale) > 1.5f || fabsf(yscale) > 1.5f);
+
+    if (useJapaneseTopScreenScaleCap) {
+        const float maxPhysicalScale = 2.0f;
+        float absViewScaleX = fabsf(renderer->viewScaleX);
+        float absViewScaleY = fabsf(renderer->viewScaleY);
+        if (absViewScaleX < 0.001f) absViewScaleX = 1.0f;
+        if (absViewScaleY < 0.001f) absViewScaleY = 1.0f;
+
+        float maxEffectiveXScale = maxPhysicalScale / absViewScaleX;
+        float maxEffectiveYScale = maxPhysicalScale / absViewScaleY;
+        if (fabsf(effectiveXScale) > maxEffectiveXScale) {
+            effectiveXScale = copysignf(maxEffectiveXScale, effectiveXScale);
+        }
+        if (fabsf(effectiveYScale) > maxEffectiveYScale) {
+            effectiveYScale = copysignf(maxEffectiveYScale, effectiveYScale);
+        }
+        renderer->textLinearFilterActive = true;
+    }
     N3DSRenderer_traceBattleText(
         renderer,
         base,
@@ -4986,7 +5015,8 @@ static void N3DSRenderer_drawTextCommon(Renderer* base, const char* text, float 
         !font->isSpriteFont &&
         N3DSRenderer_tryResolveSingleFragmentFontPage(renderer, font->tpagIndex, &fontFragment, &fontPage);
     if (useDirectFontAsset || useSingleFragmentFontFastPath) {
-        if (N3DSRenderer_tryDrawSingleGlyphTextFast(
+        if (!useReadableJapaneseBattleText &&
+            N3DSRenderer_tryDrawSingleGlyphTextFast(
                 base,
                 renderer,
                 font,
@@ -5045,8 +5075,19 @@ static void N3DSRenderer_drawTextCommon(Renderer* base, const char* text, float 
             renderer->frameTextGlyphDraws++;
             if (fabsf(angleDeg) < 0.001f) {
                 N3DSRenderer_drawImageFast(base, &image, drawX, drawY, effectiveXScale, effectiveYScale, gradient ? (uint32_t) c1 : base->drawColor, alpha);
+                if (useReadableJapaneseBattleText) {
+                    // Reinforce the same antialiased coverage without widening the
+                    // glyph. A second identical alpha blend darkens thin strokes
+                    // that still look faint after 0.5x minification.
+                    N3DSRenderer_drawImageFast(base, &image, drawX, drawY, effectiveXScale, effectiveYScale, gradient ? (uint32_t) c1 : base->drawColor, alpha);
+                    renderer->frameTextGlyphDraws++;
+                }
             } else {
                 N3DSRenderer_drawImage(base, &image, drawX, drawY, (float) cachedGlyph->sourceWidth * effectiveXScale, (float) cachedGlyph->sourceHeight * effectiveYScale, 0.0f, 0.0f, angleDeg, gradient ? (uint32_t) c1 : base->drawColor, alpha);
+                if (useReadableJapaneseBattleText) {
+                    N3DSRenderer_drawImage(base, &image, drawX, drawY, (float) cachedGlyph->sourceWidth * effectiveXScale, (float) cachedGlyph->sourceHeight * effectiveYScale, 0.0f, 0.0f, angleDeg, gradient ? (uint32_t) c1 : base->drawColor, alpha);
+                    renderer->frameTextGlyphDraws++;
+                }
             }
         }
         (void) c2;
@@ -5122,6 +5163,26 @@ static void N3DSRenderer_drawTextCommon(Renderer* base, const char* text, float 
                     glyphColor,
                     alpha
                 );
+                if (useReadableJapaneseBattleText) {
+                    N3DSRenderer_drawSpritePart(
+                        base,
+                        font->tpagIndex,
+                        glyph->sourceX,
+                        glyph->sourceY,
+                        glyph->sourceWidth,
+                        glyph->sourceHeight,
+                        cursorX + (float) glyph->offset * effectiveXScale,
+                        cursorY,
+                        effectiveXScale,
+                        effectiveYScale,
+                        angleDeg,
+                        0.0f,
+                        0.0f,
+                        glyphColor,
+                        alpha
+                    );
+                    renderer->frameTextGlyphDraws++;
+                }
             }
 
             if (pos < lineEnd) {
