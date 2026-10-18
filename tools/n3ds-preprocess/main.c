@@ -237,6 +237,83 @@ static bool syncStagedOutputToDestination(const Options* options);
 static bool convertBorderAssets(const Options* options);
 static void writeLe32(uint8_t* ptr, uint32_t value);
 
+static void writeJsonString(FILE* file, const char* value) {
+    if (file == NULL) return;
+    fputc('"', file);
+    if (value != NULL) {
+        for (const unsigned char* p = (const unsigned char*) value; *p != '\0'; ++p) {
+            switch (*p) {
+                case '"': fputs("\\\"", file); break;
+                case '\\': fputs("\\\\", file); break;
+                case '\b': fputs("\\b", file); break;
+                case '\f': fputs("\\f", file); break;
+                case '\n': fputs("\\n", file); break;
+                case '\r': fputs("\\r", file); break;
+                case '\t': fputs("\\t", file); break;
+                default:
+                    if (*p < 0x20u) fprintf(file, "\\u%04X", (unsigned int) *p);
+                    else fputc((int) *p, file);
+                    break;
+            }
+        }
+    }
+    fputc('"', file);
+}
+
+static bool writeGameMetadata(const char* outputDir, const DataWin* dataWin) {
+    if (outputDir == NULL || outputDir[0] == '\0' || dataWin == NULL) return false;
+
+    char path[1200];
+    snprintf(path, sizeof(path), "%s/game_metadata.json", outputDir);
+    FILE* file = fopen(path, "wb");
+    if (file == NULL) {
+        fprintf(stderr, "Failed to create GameMaker metadata output: %s\n", path);
+        return false;
+    }
+
+    const Gen8* gen8 = &dataWin->gen8;
+    fputs("{\n", file);
+    fputs("  \"schema_version\": 1,\n", file);
+    fputs("  \"source\": \"GEN8\",\n", file);
+
+    fputs("  \"file_name\": ", file);
+    writeJsonString(file, gen8->fileName);
+    fputs(",\n", file);
+
+    fputs("  \"config\": ", file);
+    writeJsonString(file, gen8->config);
+    fputs(",\n", file);
+
+    fputs("  \"name\": ", file);
+    writeJsonString(file, gen8->name);
+    fputs(",\n", file);
+
+    fputs("  \"display_name\": ", file);
+    writeJsonString(file, gen8->displayName);
+    fputs(",\n", file);
+
+    fprintf(file, "  \"game_id\": %lu,\n", (unsigned long) gen8->gameID);
+    fprintf(file, "  \"steam_app_id\": %ld,\n", (long) gen8->steamAppID);
+    fprintf(file, "  \"bytecode_version\": %u,\n", (unsigned int) gen8->bytecodeVersion);
+    fprintf(
+        file,
+        "  \"version\": {\"major\": %lu, \"minor\": %lu, \"release\": %lu, \"build\": %lu}\n",
+        (unsigned long) gen8->major,
+        (unsigned long) gen8->minor,
+        (unsigned long) gen8->release,
+        (unsigned long) gen8->build
+    );
+    fputs("}\n", file);
+
+    if (fclose(file) != 0) {
+        fprintf(stderr, "Failed to finalize GameMaker metadata output: %s\n", path);
+        return false;
+    }
+
+    fprintf(stderr, "Wrote GameMaker metadata: %s\n", path);
+    return true;
+}
+
 static void setDefaultOptions(Options* out) {
     memset(out, 0, sizeof(*out));
     out->keepPng = false;
@@ -266,7 +343,8 @@ static void printUsage(const char* argv0) {
         "  <output-dir>/gfx/direct_assets.bin\n"
         "  <output-dir>/gfx/room_manifest.bin\n"
         "  <output-dir>/gfx/page_000.t3x ...\n"
-        "  <output-dir>/audio/sound_bank.bin\n",
+        "  <output-dir>/audio/sound_bank.bin\n"
+        "  <output-dir>/game_metadata.json\n",
         argv0
     );
 }
@@ -5043,7 +5121,8 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    bool ok = convertTextures(&options, dataWin);
+    bool ok = writeGameMetadata(options.outputDir, dataWin);
+    if (ok) ok = convertTextures(&options, dataWin);
     if (ok) ok = convertAudio(&options, dataWin);
     DataWin_free(dataWin);
 
