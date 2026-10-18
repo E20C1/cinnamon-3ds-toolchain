@@ -391,6 +391,7 @@ typedef struct N3DSRenderer {
     bool topScreenGui2xActive;
     bool topScreenBattleViewActive;
     bool textLinearFilterActive;
+    bool textNearestFilterActive;
     uint8_t activeSceneTarget;
     const C3D_Tex* lastDrawTexture;
     float savedFrameScaleX;
@@ -428,6 +429,10 @@ static void N3DSRenderer_traceBattleSprite(
     float xscale,
     float yscale
 ) {
+    // Disabled after the hardware trace identified the real half-resolution
+    // Japanese font path. Keeping the helper for now avoids a large diagnostic
+    // cleanup diff while eliminating SD I/O and its severe frame-time cost.
+    return;
     if (!N3DSRenderer_shouldTraceBattleDraw(renderer)) return;
     FILE* file = N3DSRenderer_getDialogueTraceFile();
     if (file == NULL) return;
@@ -491,6 +496,9 @@ static void N3DSRenderer_traceBattleText(
     float effectiveXScale,
     float effectiveYScale
 ) {
+    // Disabled after the hardware trace identified the real half-resolution
+    // Japanese font path. This prevents thousands of synchronous SD writes.
+    return;
     bool containsNonAscii = false;
     if (text != NULL) {
         for (const unsigned char* p = (const unsigned char*) text; *p != '\0'; ++p) {
@@ -2091,6 +2099,11 @@ static void N3DSRenderer_trackTextureUse(N3DSRenderer* renderer, const C2D_Image
 
 static void N3DSRenderer_applyTextureFilterForScale(N3DSRenderer* renderer, C3D_Tex* texture, float scaleX, float scaleY) {
     if (texture == NULL || !Renderer_isFiniteFloat(scaleX) || !Renderer_isFiniteFloat(scaleY)) return;
+
+    if (renderer != NULL && renderer->textNearestFilterActive) {
+        C3D_TexSetFilter(texture, GPU_NEAREST, GPU_NEAREST);
+        return;
+    }
 
     if (renderer != NULL && renderer->textLinearFilterActive) {
         C3D_TexSetFilter(texture, GPU_LINEAR, GPU_LINEAR);
@@ -4916,11 +4929,40 @@ static void N3DSRenderer_drawTextCommon(Renderer* base, const char* text, float 
 
     N3DSRenderer* renderer = (N3DSRenderer*) base;
     bool savedTextLinearFilterActive = renderer->textLinearFilterActive;
+    bool savedTextNearestFilterActive = renderer->textNearestFilterActive;
     renderer->textLinearFilterActive = renderer->topScreenGui2xActive;
+    renderer->textNearestFilterActive = false;
     u64 textStartTick = svcGetSystemTick();
     Font* font = &dw->font.fonts[base->drawFont];
     float effectiveXScale = xscale * font->scaleX;
     float effectiveYScale = yscale * font->scaleY;
+
+    // Hardware trace (2026-10-18) showed the unreadable Japanese enemy bubble
+    // uses fnt_ja_plain at logical coordinates x=405..548 / y=144..204 while
+    // the 640x480 battle view is rendered at exactly 0.5x on the 3DS top screen.
+    // That leaves dense Japanese glyphs at roughly half their intended pixel
+    // height. Enlarge only this identified bubble around its observed center,
+    // and force nearest filtering so strokes remain discrete.
+    bool useReadableJapaneseBattleBubble =
+        font->name != NULL &&
+        strcmp(font->name, "fnt_ja_plain") == 0 &&
+        renderer->activeSceneTarget == N3DS_SCENE_TARGET_TOP &&
+        fabsf(renderer->viewScaleX - 0.5f) < 0.01f &&
+        fabsf(renderer->viewScaleY - 0.5f) < 0.01f &&
+        x >= 400.0f && x <= 560.0f &&
+        y >= 140.0f && y <= 210.0f;
+
+    if (useReadableJapaneseBattleBubble) {
+        const float readabilityScale = 1.5f;
+        const float bubbleCenterX = 476.5f;
+        const float bubbleCenterY = 174.0f;
+        x = bubbleCenterX + (x - bubbleCenterX) * readabilityScale;
+        y = bubbleCenterY + (y - bubbleCenterY) * readabilityScale;
+        effectiveXScale *= readabilityScale;
+        effectiveYScale *= readabilityScale;
+        renderer->textLinearFilterActive = false;
+        renderer->textNearestFilterActive = true;
+    }
     N3DSRenderer_traceBattleText(
         renderer,
         base,
@@ -4974,6 +5016,7 @@ static void N3DSRenderer_drawTextCommon(Renderer* base, const char* text, float 
             (void) c4;
             renderer->frameTextTenthsMs += (uint32_t) lround(N3DSRenderer_ticksToMs(svcGetSystemTick() - textStartTick) * 10.0);
             renderer->textLinearFilterActive = savedTextLinearFilterActive;
+    renderer->textNearestFilterActive = savedTextNearestFilterActive;
             return;
         }
 
@@ -5018,6 +5061,7 @@ static void N3DSRenderer_drawTextCommon(Renderer* base, const char* text, float 
         (void) c4;
         renderer->frameTextTenthsMs += (uint32_t) lround(N3DSRenderer_ticksToMs(svcGetSystemTick() - textStartTick) * 10.0);
         renderer->textLinearFilterActive = savedTextLinearFilterActive;
+    renderer->textNearestFilterActive = savedTextNearestFilterActive;
         return;
     }
     int32_t lineCount = TextUtils_countLines(text, len);
@@ -5107,6 +5151,7 @@ static void N3DSRenderer_drawTextCommon(Renderer* base, const char* text, float 
     (void) c4;
     renderer->frameTextTenthsMs += (uint32_t) lround(N3DSRenderer_ticksToMs(svcGetSystemTick() - textStartTick) * 10.0);
     renderer->textLinearFilterActive = savedTextLinearFilterActive;
+    renderer->textNearestFilterActive = savedTextNearestFilterActive;
 }
 
 static void N3DSRenderer_drawText(Renderer* base, const char* text, float x, float y, float xscale, float yscale, float angleDeg) {
