@@ -104,3 +104,10 @@ The runtime creates `sdmc:/3ds/cinnamon` if needed and uses it as the writable s
 Record whether the Homebrew Launcher lists and starts Cinnamon; the last visible loading message if startup stops; whether title/menu graphics render correctly; whether music and sound effects play; whether D-pad / Circle Pad / A / B / START input works; whether the first room can be entered and played; and any crash screen or Luma exception details.
 
 A successful build alone does not complete Milestone 2. Hardware acceptance is reached once this exact 3DSX launches and reaches playable UNDERTALE behavior on the New Nintendo 3DS family.
+
+
+## First validated hardware result
+
+Milestone 2 hardware acceptance has been reached on a New Nintendo 3DS-family system. The validated build launches successfully through the Homebrew Launcher, loads the locally supplied `data.win`, reaches playable UNDERTALE scenes, allows the game's Japanese language setting, and produces working music / game audio after DSP firmware setup.
+
+The first pass also confirmed a rendering issue to address next: Japanese glyphs are present and mapped correctly, but dense strokes become hard to read after top-screen scaling/filtering. This is tracked as a renderer-quality issue rather than a missing-language or UTF-8 failure.
