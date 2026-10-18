@@ -4929,34 +4929,27 @@ static void N3DSRenderer_drawTextCommon(Renderer* base, const char* text, float 
     float effectiveXScale = xscale * font->scaleX;
     float effectiveYScale = yscale * font->scaleY;
 
-    // Hardware trace (2026-10-18) showed the unreadable Japanese enemy bubble
-    // uses fnt_ja_plain at logical coordinates x=405..548 / y=144..204 while
-    // the 640x480 battle view is rendered at exactly 0.5x on the 3DS top screen.
-    // Keep the observed top-left text origin fixed and expand away from it.
-    // The first 1.5x experiment scaled around the bubble center and visibly
-    // pushed glyphs through the bubble edges. It also forced nearest filtering
-    // at a physical 0.75x scale, which can drop one-pixel Japanese strokes.
-    // At 1.5x, let the normal minification path use linear filtering instead.
-    bool useReadableJapaneseBattleBubble =
+    // Hardware trace (2026-10-18) showed Japanese battle dialogue is often
+    // rendered through the 640x480 battle view at exactly 0.5x on the 3DS top
+    // screen. Earlier fixes enlarged both glyphs and their positions around a
+    // Flowey-specific anchor; that improved readability but made long lines
+    // overflow and did not follow bubbles owned by other speakers.
+    //
+    // Treat any Japanese GameMaker font in the half-resolution top-screen pass
+    // the same way, and enlarge only the glyph raster. Keeping the original
+    // x/y positions preserves the game's wrapping and bubble layout. A stronger
+    // vertical scale recovers stroke height while the gentler horizontal scale
+    // avoids materially widening the line.
+    bool useReadableJapaneseBattleText =
         font->name != NULL &&
-        strcmp(font->name, "fnt_ja_plain") == 0 &&
+        strncmp(font->name, "fnt_ja_", 7) == 0 &&
         renderer->activeSceneTarget == N3DS_SCENE_TARGET_TOP &&
         fabsf(renderer->viewScaleX - 0.5f) < 0.01f &&
-        fabsf(renderer->viewScaleY - 0.5f) < 0.01f &&
-        x >= 400.0f && x <= 650.0f &&
-        y >= 140.0f && y <= 210.0f;
+        fabsf(renderer->viewScaleY - 0.5f) < 0.01f;
 
-    if (useReadableJapaneseBattleBubble) {
-        // Keep the vertical enlargement that made the Japanese strokes readable,
-        // but use a slightly tighter horizontal scale so longer Japanese lines
-        // remain inside the speech bubble. The previous x<=560 guard also left
-        // the last glyph of longer lines unscaled; cover the full observed range.
-        const float readabilityScaleX = 1.4f;
+    if (useReadableJapaneseBattleText) {
+        const float readabilityScaleX = 1.25f;
         const float readabilityScaleY = 1.5f;
-        const float textOriginX = 405.0f;
-        const float textOriginY = 144.0f;
-        x = textOriginX + (x - textOriginX) * readabilityScaleX;
-        y = textOriginY + (y - textOriginY) * readabilityScaleY;
         effectiveXScale *= readabilityScaleX;
         effectiveYScale *= readabilityScaleY;
         renderer->textLinearFilterActive = true;
