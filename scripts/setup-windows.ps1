@@ -162,7 +162,7 @@ function Install-DevkitPro3dsGroup {
 
     Write-Step "Installing/updating the devkitPro 3DS development group"
     & $pacman -S --needed --noconfirm 3ds-dev
-    if ((Get-MissingDevkitProPaths).Count -eq 0) {
+    if (@(Get-MissingDevkitProPaths).Count -eq 0) {
         Write-Host "[OK] devkitPro 3DS development components are installed."
         return $true
     }
@@ -207,7 +207,7 @@ function Launch-DevkitProInstaller {
 }
 
 function Ensure-DevkitPro3ds {
-    $missing = Get-MissingDevkitProPaths
+    $missing = @(Get-MissingDevkitProPaths)
     if ($missing.Count -eq 0) {
         Write-Host "[OK] devkitPro 3DS development components are already installed."
         return
@@ -227,7 +227,7 @@ function Ensure-DevkitPro3ds {
         }
     }
 
-    $missing = Get-MissingDevkitProPaths
+    $missing = @(Get-MissingDevkitProPaths)
     if ($missing.Count -gt 0) {
         $detail = $missing -join [Environment]::NewLine
         throw ("devkitPro 3DS setup is incomplete. Missing paths:" + [Environment]::NewLine + $detail)
