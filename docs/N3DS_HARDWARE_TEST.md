@@ -64,7 +64,9 @@ The current audio backend calls libctru `ndspInit()`. libctru looks for the DSP 
 sdmc:/3ds/dspfirm.cdc
 ```
 
-On a current Luma3DS setup, open Rosalina (default combo: **L + D-Pad Down + Select**), choose **Miscellaneous options**, then **Dump DSP firmware**. Luma writes `/3ds/dspfirm.cdc` to the SD card.
+On Luma3DS **v11.0 or newer**, open Rosalina (default combo: **L + D-Pad Down + Select**), choose **Miscellaneous options**, then **Dump DSP firmware**. Luma writes `/3ds/dspfirm.cdc` to the SD card.
+
+Older Luma builds such as **v9.1** do not contain this Rosalina menu item. If the option is absent, update Luma using the current Luma3DS / 3DS Hacks Guide update procedure before continuing, rather than treating the missing menu item as a Cinnamon problem.
 
 This only needs to be done once per SD setup.
 
