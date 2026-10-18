@@ -7217,6 +7217,9 @@ static void builtin_trace3DSBattleGlyphText(
     static uint32_t traceCount = 0u;
     if (traceCount >= 48u || ctx == NULL || text == NULL) return;
 
+    // Ordinary writer text was responsible for the 512 SD writes in probe v2.
+    if (fabsf(xscale - 1.0f) <= 0.05f && fabsf(yscale - 1.0f) <= 0.05f) return;
+
     size_t len = strlen(text);
     if (len == 0u || len > 6u) return;
 
@@ -7239,17 +7242,6 @@ static void builtin_trace3DSBattleGlyphText(
     // single-glyph calls.
     if (strcmp(codeName, "gml_Script_scr_namingscreen") == 0 ||
         strcmp(objName, "obj_intromenu") == 0) return;
-
-    bool dialogueRelated =
-        builtin_traceObjectLooksDialogueRelated(runner, inst) ||
-        strstr(codeName, "writer") != NULL ||
-        strstr(codeName, "WRITER") != NULL ||
-        strstr(codeName, "blcon") != NULL ||
-        strstr(codeName, "flowey") != NULL ||
-        strstr(codeName, "battle") != NULL;
-    bool transformed = fabsf(xscale - 1.0f) > 0.05f || fabsf(yscale - 1.0f) > 0.05f;
-    // Writer glyphs are drawn every frame; sample only explicitly transformed calls.
-    if (!transformed) return;
 
     FILE* file = fopen("sdmc:/3ds/cinnamon/battle_glyph_probe.log", "a");
     if (file == NULL) return;
