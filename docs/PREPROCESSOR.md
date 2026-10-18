@@ -21,6 +21,10 @@ The host machine needs:
 
 The build script does not install system packages. It first tries tools from `PATH`, then known local locations such as `C:\devkitPro`.
 
+## Fresh Windows machine
+
+For a fresh Windows environment, use the one-click bootstrap documented in [WINDOWS_SETUP.md](WINDOWS_SETUP.md). It detects already-installed components, installs missing host/3DS toolchain dependencies, verifies them, and builds the preprocessor by default.
+
 ## Build from source
 
 From the repository root in PowerShell:
