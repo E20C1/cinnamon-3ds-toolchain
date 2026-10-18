@@ -153,8 +153,10 @@ $hostToolDirs = @(
 if ($makeTool) {
     $hostToolDirs += (Split-Path -Parent $makeTool)
 }
-$hostToolDirs = $hostToolDirs | Select-Object -Unique
-foreach ($dir in [array]::Reverse([object[]]$hostToolDirs.Clone())) {
+$hostToolDirs = @($hostToolDirs | Select-Object -Unique)
+$dirsToPrepend = @($hostToolDirs)
+[array]::Reverse($dirsToPrepend)
+foreach ($dir in $dirsToPrepend) {
     if ($dir -and (($env:PATH -split ';') -notcontains $dir)) {
         $env:PATH = "$dir;$env:PATH"
     }
