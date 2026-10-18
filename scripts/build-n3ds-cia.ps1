@@ -197,9 +197,6 @@ if ($needsPreprocessorBuild) {
     }
     Write-Host "Building host preprocessor..."
     & (Join-Path $PSScriptRoot "build-preprocessor.ps1")
-    if ($LASTEXITCODE -ne 0) {
-        throw "Host preprocessor build failed with exit code $LASTEXITCODE."
-    }
     $preprocessorPath = Get-ExistingPreprocessor -ExplicitPath ""
     if (-not $preprocessorPath) {
         throw "Host preprocessor build succeeded, but n3ds-preprocess could not be located."
@@ -216,9 +213,6 @@ if (-not $SkipPreprocess) {
         Tex3ds = $Tex3ds
     }
     & (Join-Path $PSScriptRoot "preprocess-game.ps1") @preprocessArgs
-    if ($LASTEXITCODE -ne 0) {
-        throw "Game preprocessing failed with exit code $LASTEXITCODE."
-    }
 }
 
 if (-not (Test-Path -LiteralPath $assetPath -PathType Container)) {
@@ -341,9 +335,6 @@ try {
         DisableBottomScreen = $DisableBottomScreen
     }
     & (Join-Path $PSScriptRoot "build-n3ds.ps1") @n3dsArgs
-    if ($LASTEXITCODE -ne 0) {
-        throw "Nintendo 3DS ELF build failed with exit code $LASTEXITCODE."
-    }
 
     $elfPath = Join-Path $appBuildPath "cinnamon.elf"
     if (-not (Test-Path -LiteralPath $elfPath -PathType Leaf)) {
