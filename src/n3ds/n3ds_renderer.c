@@ -71,6 +71,24 @@
 #define N3DS_C2D_FLUSH_DRAW_BUDGET 192u
 #define N3DS_PERF_LOG_INTERVAL_FRAMES 30u
 #define N3DS_ATLAS_TRACE_LOG_PATH "sdmc:/3ds/cinnamon/atlas_trace.log"
+#define N3DS_DIALOGUE_RENDER_TRACE_PATH "sdmc:/3ds/cinnamon/dialogue_trace.log"
+#define N3DS_DIALOGUE_RENDER_TRACE_LIMIT 4096u
+
+static FILE* gN3DSDialogueRenderTraceFile = NULL;
+static uint32_t gN3DSDialogueRenderTraceCount = 0u;
+
+static FILE* N3DSRenderer_getDialogueTraceFile(void) {
+    if (gN3DSDialogueRenderTraceFile != NULL) return gN3DSDialogueRenderTraceFile;
+    gN3DSDialogueRenderTraceFile = fopen(N3DS_DIALOGUE_RENDER_TRACE_PATH, "a");
+    if (gN3DSDialogueRenderTraceFile != NULL) {
+        setvbuf(gN3DSDialogueRenderTraceFile, NULL, _IOLBF, 0);
+        fputs("Cinnamon 3DS dialogue trace: renderer tracing active\n", gN3DSDialogueRenderTraceFile);
+        fflush(gN3DSDialogueRenderTraceFile);
+    }
+    return gN3DSDialogueRenderTraceFile;
+}
+
+static bool N3DSRenderer_shouldTraceBattleDraw(const struct N3DSRenderer* renderer);
 
 typedef struct {
     uint16_t width;
@@ -267,7 +285,7 @@ typedef struct {
     uint8_t reserved;
 } N3DSRoomManifestPageRef;
 
-typedef struct {
+typedef struct N3DSRenderer {
     Renderer base;
     C3D_RenderTarget* topTarget;
     C3D_RenderTarget* bottomTarget;
@@ -390,6 +408,154 @@ typedef struct {
     bool isNew3DS;
     bool pendingOld3DSAtlasFlush;
 } N3DSRenderer;
+
+static bool N3DSRenderer_shouldTraceBattleDraw(const N3DSRenderer* renderer) {
+    return renderer != NULL &&
+        gN3DSDialogueRenderTraceCount < N3DS_DIALOGUE_RENDER_TRACE_LIMIT &&
+        (renderer->topScreenBattleViewActive ||
+         renderer->topScreenGuiActive ||
+         renderer->topScreenGui2xActive);
+}
+
+static void N3DSRenderer_traceBattleSprite(
+    N3DSRenderer* renderer,
+    const char* kind,
+    int32_t tpagIndex,
+    int32_t srcX,
+    int32_t srcY,
+    int32_t srcW,
+    int32_t srcH,
+    float x,
+    float y,
+    float xscale,
+    float yscale
+) {
+    if (!N3DSRenderer_shouldTraceBattleDraw(renderer)) return;
+    FILE* file = N3DSRenderer_getDialogueTraceFile();
+    if (file == NULL) return;
+
+    int32_t spriteIndex = -1;
+    int32_t frameIndex = -1;
+    const char* spriteName = "<unmapped>";
+    if (renderer->tpagToSpriteIndex != NULL &&
+        tpagIndex >= 0 &&
+        (uint32_t) tpagIndex < renderer->base.dataWin->tpag.count) {
+        spriteIndex = renderer->tpagToSpriteIndex[tpagIndex];
+        if (renderer->tpagToSpriteFrameIndex != NULL) {
+            frameIndex = renderer->tpagToSpriteFrameIndex[tpagIndex];
+        }
+        if (spriteIndex >= 0 && (uint32_t) spriteIndex < renderer->base.dataWin->sprt.count) {
+            const char* candidate = renderer->base.dataWin->sprt.sprites[spriteIndex].name;
+            if (candidate != NULL) spriteName = candidate;
+        }
+    }
+
+    char line[512];
+    snprintf(
+        line,
+        sizeof(line),
+        "%04lu R_SPR kind=%s tpag=%ld sprite=%ld:%s frame=%ld src=%ld,%ld,%ld,%ld xy=%.2f,%.2f scale=%.3f,%.3f viewScale=%.3f,%.3f flags=b%d,g%d,g2%d,target%u\n",
+        (unsigned long) gN3DSDialogueRenderTraceCount,
+        kind != NULL ? kind : "?",
+        (long) tpagIndex,
+        (long) spriteIndex,
+        spriteName,
+        (long) frameIndex,
+        (long) srcX,
+        (long) srcY,
+        (long) srcW,
+        (long) srcH,
+        (double) x,
+        (double) y,
+        (double) xscale,
+        (double) yscale,
+        (double) renderer->viewScaleX,
+        (double) renderer->viewScaleY,
+        renderer->topScreenBattleViewActive ? 1 : 0,
+        renderer->topScreenGuiActive ? 1 : 0,
+        renderer->topScreenGui2xActive ? 1 : 0,
+        (unsigned int) renderer->activeSceneTarget
+    );
+    fputs(line, file);
+    fflush(file);
+    gN3DSDialogueRenderTraceCount++;
+}
+
+static void N3DSRenderer_traceBattleText(
+    N3DSRenderer* renderer,
+    Renderer* base,
+    Font* font,
+    const char* text,
+    float x,
+    float y,
+    float xscale,
+    float yscale,
+    float effectiveXScale,
+    float effectiveYScale
+) {
+    if (!N3DSRenderer_shouldTraceBattleDraw(renderer)) return;
+    FILE* file = N3DSRenderer_getDialogueTraceFile();
+    if (file == NULL) return;
+
+    size_t len = text != NULL ? strlen(text) : 0u;
+    char line[768];
+    int used = snprintf(
+        line,
+        sizeof(line),
+        "%04lu R_TXT font=%ld:%s spriteFont=%d sprite=%ld tpag=%ld xy=%.2f,%.2f argScale=%.3f,%.3f effScale=%.3f,%.3f fontScale=%.3f,%.3f viewScale=%.3f,%.3f flags=b%d,g%d,g2%d,target%u len=%lu bytes=",
+        (unsigned long) gN3DSDialogueRenderTraceCount,
+        (long) base->drawFont,
+        (font != NULL && font->name != NULL) ? font->name : "<unnamed>",
+        font != NULL && font->isSpriteFont ? 1 : 0,
+        font != NULL ? (long) font->spriteIndex : -1L,
+        font != NULL ? (long) font->tpagIndex : -1L,
+        (double) x,
+        (double) y,
+        (double) xscale,
+        (double) yscale,
+        (double) effectiveXScale,
+        (double) effectiveYScale,
+        font != NULL ? (double) font->scaleX : 0.0,
+        font != NULL ? (double) font->scaleY : 0.0,
+        (double) renderer->viewScaleX,
+        (double) renderer->viewScaleY,
+        renderer->topScreenBattleViewActive ? 1 : 0,
+        renderer->topScreenGuiActive ? 1 : 0,
+        renderer->topScreenGui2xActive ? 1 : 0,
+        (unsigned int) renderer->activeSceneTarget,
+        (unsigned long) len
+    );
+    if (used < 0) return;
+    size_t cursor = (size_t) used;
+    if (cursor >= sizeof(line)) cursor = sizeof(line) - 1u;
+
+    size_t preview = len < 64u ? len : 64u;
+    for (size_t i = 0; i < preview && cursor + 2u < sizeof(line); ++i) {
+        int wrote = snprintf(
+            line + cursor,
+            sizeof(line) - cursor,
+            "%02X",
+            (unsigned int) (unsigned char) text[i]
+        );
+        if (wrote <= 0) break;
+        cursor += (size_t) wrote;
+    }
+    if (preview < len && cursor + 3u < sizeof(line)) {
+        memcpy(line + cursor, "...", 3u);
+        cursor += 3u;
+    }
+    if (cursor + 1u < sizeof(line)) {
+        line[cursor++] = '\n';
+        line[cursor] = '\0';
+    } else {
+        line[sizeof(line) - 2u] = '\n';
+        line[sizeof(line) - 1u] = '\0';
+    }
+
+    fputs(line, file);
+    fflush(file);
+    gN3DSDialogueRenderTraceCount++;
+}
 
 enum {
     N3DS_SCENE_TARGET_NONE = 0,
@@ -3325,6 +3491,11 @@ static void N3DSRenderer_init(Renderer* base, DataWin* dataWin) {
 }
 
 static void N3DSRenderer_destroy(Renderer* base) {
+    if (gN3DSDialogueRenderTraceFile != NULL) {
+        fflush(gN3DSDialogueRenderTraceFile);
+        fclose(gN3DSDialogueRenderTraceFile);
+        gN3DSDialogueRenderTraceFile = NULL;
+    }
     N3DSRenderer* renderer = (N3DSRenderer*) base;
     repeat(renderer->atlasPageCount, i) {
         N3DSRenderer_unloadPage(renderer, (uint32_t) i);
@@ -3776,6 +3947,19 @@ static void N3DSRenderer_drawSprite(Renderer* base, int32_t tpagIndex, float x, 
     TexturePageItem* tpag = &dw->tpag.items[tpagIndex];
 
     N3DSRenderer* renderer = (N3DSRenderer*) base;
+    N3DSRenderer_traceBattleSprite(
+        renderer,
+        "sprite",
+        tpagIndex,
+        0,
+        0,
+        (int32_t) tpag->sourceWidth,
+        (int32_t) tpag->sourceHeight,
+        x,
+        y,
+        xscale,
+        yscale
+    );
     N3DSDynamicCaptureTPAG* dynamicCapture = N3DSRenderer_getDynamicCaptureTPAG(renderer, tpagIndex);
     N3DSRenderer_traceTPAGUsage(renderer, N3DS_TRACE_KIND_SPRITE, tpagIndex);
     renderer->frameSpriteDrawCalls++;
@@ -3866,6 +4050,19 @@ static void N3DSRenderer_drawSpritePart(Renderer* base, int32_t tpagIndex, int32
     }
 
     N3DSRenderer* renderer = (N3DSRenderer*) base;
+    N3DSRenderer_traceBattleSprite(
+        renderer,
+        "sprite_part",
+        tpagIndex,
+        srcOffX,
+        srcOffY,
+        srcW,
+        srcH,
+        x,
+        y,
+        xscale,
+        yscale
+    );
     N3DSDynamicCaptureTPAG* dynamicCapture = N3DSRenderer_getDynamicCaptureTPAG(renderer, tpagIndex);
     N3DSRenderer_traceTPAGUsage(renderer, N3DS_TRACE_KIND_SPRITE_PART, tpagIndex);
     renderer->frameSpritePartDrawCalls++;
@@ -4717,6 +4914,18 @@ static void N3DSRenderer_drawTextCommon(Renderer* base, const char* text, float 
     Font* font = &dw->font.fonts[base->drawFont];
     float effectiveXScale = xscale * font->scaleX;
     float effectiveYScale = yscale * font->scaleY;
+    N3DSRenderer_traceBattleText(
+        renderer,
+        base,
+        font,
+        text,
+        x,
+        y,
+        xscale,
+        yscale,
+        effectiveXScale,
+        effectiveYScale
+    );
 
     if (!font->isSpriteFont && font->tpagIndex >= 0) {
         N3DSRenderer_traceTPAGUsage(renderer, N3DS_TRACE_KIND_FONT, font->tpagIndex);
