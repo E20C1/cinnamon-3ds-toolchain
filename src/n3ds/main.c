@@ -691,7 +691,7 @@ int main(int argc, char** argv) {
     // running on hardware while diagnosing transformed Japanese text.
     FILE* buildMarker = fopen("sdmc:/3ds/cinnamon/build_marker.txt", "wb");
     if (buildMarker != NULL) {
-        fputs("cinnamon-3ds Japanese glyph bounds probe v3\n", buildMarker);
+        fputs("cinnamon-3ds VM kana-ne metadata probe v4\n", buildMarker);
         fclose(buildMarker);
     }
 
@@ -704,7 +704,7 @@ int main(int argc, char** argv) {
     // Bounded, deduplicated renderer measurements. Reset on each launch.
     FILE* glyphBoundsProbe = fopen("sdmc:/3ds/cinnamon/glyph_bounds_probe.log", "wb");
     if (glyphBoundsProbe != NULL) {
-        fputs("Cinnamon 3DS Japanese glyph bounds probe v3\n", glyphBoundsProbe);
+        fputs("Cinnamon 3DS VM kana-ne metadata probe v4\n", glyphBoundsProbe);
         fclose(glyphBoundsProbe);
     }
 
