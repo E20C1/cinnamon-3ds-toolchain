@@ -4970,26 +4970,49 @@ static void N3DSRenderer_drawTextCommon(Renderer* base, const char* text, float 
         (fabsf(xscale) > 1.5f || fabsf(yscale) > 1.5f);
 
     if (useJapaneseTopScreenScaleCap) {
-        // Hardware trace shows the deliberate 2x/3x Japanese emphasis can
-        // also be emitted in a viewScale=1.0 pass (for example fnt_ja_maintext),
-        // so a half-resolution-only guard misses the exact oversized glyph seen
-        // in the Flowey bubble. Apply the cap to any top-screen Japanese
-        // transformed text. 1.25x keeps the emphasis obvious while leaving
-        // enough room for the glyph inside the speech bubble.
+        // Hardware trace of UNDERTALE's single-glyph emphasis animation showed
+        // that the game moves the glyph while increasing scale. Simply clamping
+        // the scale leaves the original "large-scale" x/y behind, which is why
+        // the reduced glyph still hangs below the bubble. Clamp the size and
+        // compensate x/y back along the traced animation path.
         const float maxPhysicalScale = 1.25f;
         float absViewScaleX = fabsf(renderer->viewScaleX);
         float absViewScaleY = fabsf(renderer->viewScaleY);
         if (absViewScaleX < 0.001f) absViewScaleX = 1.0f;
         if (absViewScaleY < 0.001f) absViewScaleY = 1.0f;
 
+        float originalArgScale = fmaxf(fabsf(xscale), fabsf(yscale));
         float maxEffectiveXScale = maxPhysicalScale / absViewScaleX;
         float maxEffectiveYScale = maxPhysicalScale / absViewScaleY;
+        float cappedArgScale = originalArgScale;
+
         if (fabsf(effectiveXScale) > maxEffectiveXScale) {
             effectiveXScale = copysignf(maxEffectiveXScale, effectiveXScale);
+            if (font->scaleX != 0.0f) {
+                cappedArgScale = fminf(cappedArgScale, maxEffectiveXScale / fabsf(font->scaleX));
+            }
         }
         if (fabsf(effectiveYScale) > maxEffectiveYScale) {
             effectiveYScale = copysignf(maxEffectiveYScale, effectiveYScale);
+            if (font->scaleY != 0.0f) {
+                cappedArgScale = fminf(cappedArgScale, maxEffectiveYScale / fabsf(font->scaleY));
+            }
         }
+
+        // The captured fnt_ja_maintext emphasis sequence follows approximately
+        // x = 135.21 - 16.69*scale, y = 19.45 + 25.02*scale.
+        // Reproject a capped single glyph to the matching point on that path.
+        // This is deliberately limited to the large Japanese main-text glyph
+        // effect so normal dialogue and shake offsets remain untouched.
+        if (strcmp(font->name, "fnt_ja_maintext") == 0 &&
+            text != NULL &&
+            strlen(text) <= 4u &&
+            originalArgScale > cappedArgScale + 0.001f) {
+            float removedScale = originalArgScale - cappedArgScale;
+            x += 16.69f * removedScale;
+            y -= 25.02f * removedScale;
+        }
+
         renderer->textLinearFilterActive = true;
     }
     N3DSRenderer_traceBattleText(
