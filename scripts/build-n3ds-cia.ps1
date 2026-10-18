@@ -256,7 +256,7 @@ $resolvedUniqueId = if ($UniqueId) {
 } elseif ($preset -and $preset.unique_id) {
     [string]$preset.unique_id
 } else {
-    "0x{0:X5}" -f (0xC0000 -bor ([int]$gameId -band 0x3FFFF))
+    "0x{0:X5}" -f (0xF0000 -bor ([int]$gameId -band 0xFFFF))
 }
 
 $resolvedProductCode = if ($ProductCode) {
@@ -264,7 +264,7 @@ $resolvedProductCode = if ($ProductCode) {
 } elseif ($preset -and $preset.product_code) {
     [string]$preset.product_code
 } else {
-    "CTR-N-{0:X4}" -f ([int]$gameId -band 0xFFFF)
+    "CTR-H-{0:X4}" -f ([int]$gameId -band 0xFFFF)
 }
 
 $presetIcon = if ($preset -and $preset.icon) { [string]$preset.icon } else { "" }
