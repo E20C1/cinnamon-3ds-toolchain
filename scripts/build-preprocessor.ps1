@@ -103,7 +103,18 @@ $makeTool = Resolve-Executable `
 if (-not $Generator) {
     if ($env:CINNAMON_HOST_CMAKE_GENERATOR) {
         $Generator = $env:CINNAMON_HOST_CMAKE_GENERATOR
-    } elseif ($makeTool -and ([System.IO.Path]::GetFileName($makeTool) -match '^ninja(\.exe)?
+    } elseif ($makeTool -and ([System.IO.Path]::GetFileName($makeTool) -match '^ninja(\.exe)?$')) {
+        $Generator = "Ninja"
+    } elseif ($makeTool -and ([System.IO.Path]::GetFileName($makeTool) -match '^mingw32-make(\.exe)?$')) {
+        $Generator = "MinGW Makefiles"
+    }
+}
+
+if (-not $Generator) {
+    throw "A supported host build generator was not found. Install Ninja or pass -Generator and -MakeProgram explicitly."
+}
+
+New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
 
 $configureArgs = @(
     "-S", $sourceDir,
