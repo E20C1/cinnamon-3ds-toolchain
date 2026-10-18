@@ -12,6 +12,7 @@ on:
       - "scripts/preprocess-game.ps1"
       - "scripts/setup-windows.ps1"
       - "scripts/build-n3ds.ps1"
+      - "scripts/stage-n3ds-sd.ps1"
       - "build-windows-n3ds.ps1"
       - "build-new3ds.cmd"
       - "setup-windows.cmd"
@@ -27,6 +28,7 @@ on:
       - "scripts/preprocess-game.ps1"
       - "scripts/setup-windows.ps1"
       - "scripts/build-n3ds.ps1"
+      - "scripts/stage-n3ds-sd.ps1"
       - "build-windows-n3ds.ps1"
       - "build-new3ds.cmd"
       - "setup-windows.cmd"
@@ -52,7 +54,7 @@ jobs:
         shell: pwsh
         run: |
           $failed = $false
-          foreach ($path in @("scripts/build-preprocessor.ps1", "scripts/preprocess-game.ps1", "scripts/setup-windows.ps1", "scripts/build-n3ds.ps1", "build-windows-n3ds.ps1")) {
+          foreach ($path in @("scripts/build-preprocessor.ps1", "scripts/preprocess-game.ps1", "scripts/setup-windows.ps1", "scripts/build-n3ds.ps1", "scripts/stage-n3ds-sd.ps1", "build-windows-n3ds.ps1")) {
             $tokens = $null
             $errors = $null
             [System.Management.Automation.Language.Parser]::ParseFile(
