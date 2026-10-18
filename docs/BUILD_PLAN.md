@@ -10,7 +10,7 @@ Acceptance: a user-owned UNDERTALE `data.win` can be converted without corruptio
 
 ## Milestone 2: reproduce the inherited 3DSX build
 
-Status: **build portion completed locally; hardware validation pending**. The Windows build wrapper has produced a Release `cinnamon.3dsx` and `cinnamon.elf` with the generated asset tree embedded as RomFS and recorded the local 3DS build manifest.
+Status: **acceptance reached on New Nintendo 3DS hardware**. The Release `cinnamon.3dsx` launches from the Homebrew Launcher, reads the user's local `data.win`, reaches playable UNDERTALE behavior, accepts the Japanese language setting, and produces working game audio. The first hardware pass also exposed a text-readability issue: dense Japanese glyphs become visibly degraded after the 3DS top-screen downscale.
 
 Build Cinnamon with `PLATFORM=n3ds` using the generated assets either embedded in RomFS or loaded from `sdmc:/3ds/cinnamon`.
 
