@@ -4935,17 +4935,20 @@ static void N3DSRenderer_drawTextCommon(Renderer* base, const char* text, float 
     // Flowey-specific anchor; that improved readability but made long lines
     // overflow and did not follow bubbles owned by other speakers.
     //
-    // Treat any Japanese GameMaker font in the half-resolution top-screen pass
-    // the same way, and enlarge only the glyph raster. Keeping the original
-    // x/y positions preserves the game's wrapping and bubble layout. A stronger
-    // vertical scale recovers stroke height while the gentler horizontal scale
-    // avoids materially widening the line.
+    // Treat normal-size Japanese GameMaker fonts in the half-resolution
+    // top-screen pass the same way. Do not touch text that the game deliberately
+    // scales (for example sudden oversized glyph effects); otherwise the 3DS
+    // readability multiplier compounds the original animation and can push a
+    // glyph far outside its speech bubble. Shaking effects only move x/y, so
+    // they continue to work with this guard.
     bool useReadableJapaneseBattleText =
         font->name != NULL &&
         strncmp(font->name, "fnt_ja_", 7) == 0 &&
         renderer->activeSceneTarget == N3DS_SCENE_TARGET_TOP &&
         fabsf(renderer->viewScaleX - 0.5f) < 0.01f &&
-        fabsf(renderer->viewScaleY - 0.5f) < 0.01f;
+        fabsf(renderer->viewScaleY - 0.5f) < 0.01f &&
+        fabsf(xscale - 1.0f) < 0.15f &&
+        fabsf(yscale - 1.0f) < 0.15f;
 
     if (useReadableJapaneseBattleText) {
         const float readabilityScaleX = 1.25f;
