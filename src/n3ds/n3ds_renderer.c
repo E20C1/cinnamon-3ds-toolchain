@@ -4718,22 +4718,6 @@ static void N3DSRenderer_drawTextCommon(Renderer* base, const char* text, float 
     float effectiveXScale = xscale * font->scaleX;
     float effectiveYScale = yscale * font->scaleY;
 
-    // Enemy battle dialogue is replayed into the top screen from the 640x480
-    // GameMaker GUI. The 3DS only has 240 vertical pixels, and the Japanese
-    // bitmap font loses too much detail at the inherited size even when the
-    // texture filter is changed. Enlarge only non-ASCII text in this special
-    // enemy-dialogue pass; ordinary scene/dialogue text keeps its native scale.
-    bool containsNonAscii = false;
-    for (const unsigned char* p = (const unsigned char*) text; *p != '\0'; ++p) {
-        if (*p >= 0x80u) {
-            containsNonAscii = true;
-            break;
-        }
-    }
-    if (renderer->topScreenGui2xActive && containsNonAscii) {
-        effectiveXScale *= 1.5f;
-        effectiveYScale *= 1.5f;
-    }
     if (!font->isSpriteFont && font->tpagIndex >= 0) {
         N3DSRenderer_traceTPAGUsage(renderer, N3DS_TRACE_KIND_FONT, font->tpagIndex);
     }
