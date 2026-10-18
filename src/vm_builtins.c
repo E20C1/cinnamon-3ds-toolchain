@@ -43,6 +43,18 @@ static void N3DS_setAsrielRainbowInfoLed(Runner* runner);
 
 static RValue builtinN3DSRenderTopScreen(VMContext* ctx, RValue* args, int32_t argCount);
 static bool battleDraw_is3DSBattleActive(VMContext* ctx, Runner* runner);
+#ifdef __3DS__
+static void builtin_trace3DSBattleGlyphSprite(
+    VMContext* ctx,
+    const char* api,
+    int32_t spriteIndex,
+    int32_t subimg,
+    float x,
+    float y,
+    float xscale,
+    float yscale
+);
+#endif
 
 #ifdef __3DS__
 static Result g_n3dsAsrielLedInitRc = 0;
