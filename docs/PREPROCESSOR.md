@@ -69,6 +69,13 @@ Run:
 .\scripts\preprocess-game.ps1 -DataWin "C:\path\to\UNDERTALE\data.win"
 ```
 
+
+You may also pass the game directory itself. If it contains `data.win`, the wrapper resolves it automatically:
+
+```powershell
+.\scripts\preprocess-game.ps1 -DataWin "C:\path\to\UNDERTALE"
+```
+
 The default output is:
 
 ```text
