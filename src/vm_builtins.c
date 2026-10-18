@@ -6516,10 +6516,13 @@ static uint32_t g_n3dsDialogueTraceCount = 0u;
 
 static bool builtin_shouldTrace3DSTopEnemyDialogue(VMContext* ctx) {
     Runner* runner = ctx != NULL ? (Runner*) ctx->runner : NULL;
-    return runner != NULL &&
-        runner->osType == OS_3DS &&
-        runner->renderer != NULL &&
-        runner->n3dsDrawHasTopEnemyDialogue &&
+    if (runner == NULL || runner->osType != OS_3DS || runner->renderer == NULL) return false;
+
+    // The first diagnostic required both flags simultaneously and produced no
+    // file on hardware. Trace when any relevant battle/top-GUI state is active
+    // so we can identify which path really renders the dialogue.
+    return runner->n3dsDrawBattleActive ||
+        runner->n3dsDrawHasTopEnemyDialogue ||
         N3DSRenderer_isTopScreenGUIActive(runner->renderer);
 }
 
@@ -6532,10 +6535,10 @@ static const char* builtin_getTraceObjectName(Runner* runner, Instance* inst) {
 
 static FILE* builtin_get3DSDialogueTraceFile(void) {
     if (g_n3dsDialogueTraceFile != NULL) return g_n3dsDialogueTraceFile;
-    g_n3dsDialogueTraceFile = fopen("sdmc:/3ds/cinnamon/dialogue_trace.log", "w");
+    g_n3dsDialogueTraceFile = fopen("sdmc:/3ds/cinnamon/dialogue_trace.log", "a");
     if (g_n3dsDialogueTraceFile != NULL) {
         setvbuf(g_n3dsDialogueTraceFile, NULL, _IOLBF, 0);
-        fprintf(g_n3dsDialogueTraceFile, "Cinnamon 3DS enemy-dialogue draw trace\n");
+        fprintf(g_n3dsDialogueTraceFile, "Cinnamon 3DS enemy-dialogue draw trace: VM tracing active\n");
     }
     return g_n3dsDialogueTraceFile;
 }
