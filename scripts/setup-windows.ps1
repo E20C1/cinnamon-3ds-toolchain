@@ -69,9 +69,24 @@ function Ensure-WingetPackage {
 }
 
 function Test-CMake {
-    return [bool](Resolve-Executable -CommandNames @("cmake.exe", "cmake") -FallbackPaths @(
-        "C:\Program Files\CMake\bin\cmake.exe"
-    ))
+    foreach ($path in @(
+        "C:\Program Files\CMake\bin\cmake.exe",
+        "C:\Program Files (x86)\CMake\bin\cmake.exe"
+    )) {
+        if (Test-Path -LiteralPath $path -PathType Leaf) {
+            return $true
+        }
+    }
+
+    $commands = @(Get-Command cmake.exe, cmake -All -ErrorAction SilentlyContinue)
+    foreach ($command in $commands) {
+        if (-not $command) { continue }
+        if ($command.Source -and $command.Source -notmatch '(?i)\\devkitPro\\msys2\\') {
+            return $true
+        }
+    }
+
+    return $false
 }
 
 function Test-Git {
