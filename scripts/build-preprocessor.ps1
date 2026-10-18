@@ -163,9 +163,11 @@ foreach ($dir in $dirsToPrepend) {
 }
 
 Write-Host "Checking host C compiler..."
-& $compiler --version | Select-Object -First 1 | Write-Host
-if ($LASTEXITCODE -ne 0) {
-    throw "Host C compiler failed to start with exit code ${LASTEXITCODE}: $compiler"
+$compilerVersionOutput = & $compiler --version 2>&1
+$compilerExitCode = $LASTEXITCODE
+$compilerVersionOutput | Select-Object -First 1 | Write-Host
+if ($compilerExitCode -ne 0) {
+    throw "Host C compiler failed to start with exit code ${compilerExitCode}: $compiler"
 }
 
 New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
