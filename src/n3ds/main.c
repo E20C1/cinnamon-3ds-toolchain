@@ -687,16 +687,6 @@ int main(int argc, char** argv) {
     mkdir("sdmc:/3ds", 0777);
     mkdir("sdmc:/3ds/cinnamon", 0777);
 
-    // Diagnostic builds always create this marker at startup. Later draw tracing
-    // appends to the same file. This distinguishes "no matching draw path" from
-    // "the diagnostic binary was not actually launched / SD writes failed".
-    FILE* dialogueTraceMarker = fopen("sdmc:/3ds/cinnamon/dialogue_trace.log", "wb");
-    if (dialogueTraceMarker != NULL) {
-        fputs("Cinnamon 3DS dialogue trace v3: startup OK\n", dialogueTraceMarker);
-        fflush(dialogueTraceMarker);
-        fclose(dialogueTraceMarker);
-    }
-
     char* dataWinPath = chooseDataWinPath();
 
     N3DSLoadingScreen loadingScreen = {0};
