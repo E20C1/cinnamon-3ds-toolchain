@@ -7191,6 +7191,60 @@ static char* builtin_wrapProcessedTextForWidth(Renderer* renderer, const char* t
     return outText;
 }
 
+#ifdef __3DS__
+static void builtin_trace3DSTransformedText(
+    VMContext* ctx,
+    const char* api,
+    const char* text,
+    float x,
+    float y,
+    float xscale,
+    float yscale,
+    float angle
+) {
+    static uint32_t traceCount = 0u;
+    if (traceCount >= 128u || ctx == NULL || text == NULL) return;
+    if (fabsf(xscale) <= 1.05f && fabsf(yscale) <= 1.05f) return;
+
+    bool nonAscii = false;
+    for (const unsigned char* p = (const unsigned char*) text; *p != '\0'; ++p) {
+        if (*p >= 0x80u) { nonAscii = true; break; }
+    }
+    if (!nonAscii) return;
+
+    Runner* runner = (Runner*) ctx->runner;
+    if (runner == NULL || runner->renderer == NULL || runner->osType != OS_3DS) return;
+
+    Instance* inst = ctx->currentInstance != NULL ? (Instance*) ctx->currentInstance : NULL;
+    FILE* file = fopen("sdmc:/3ds/cinnamon/transformed_text_trace.log", "a");
+    if (file == NULL) return;
+
+    fprintf(
+        file,
+        "%03lu api=%s code=%s obj=%s font=%ld xy=%.2f,%.2f scale=%.3f,%.3f angle=%.3f bytes=",
+        (unsigned long) traceCount,
+        api != NULL ? api : "?",
+        ctx->currentCodeName != NULL ? ctx->currentCodeName : "<none>",
+        builtin_getTraceObjectName(runner, inst),
+        (long) runner->renderer->drawFont,
+        (double) x,
+        (double) y,
+        (double) xscale,
+        (double) yscale,
+        (double) angle
+    );
+    size_t len = strlen(text);
+    size_t preview = len < 24u ? len : 24u;
+    for (size_t i = 0; i < preview; ++i) {
+        fprintf(file, "%02X", (unsigned int) (unsigned char) text[i]);
+    }
+    if (preview < len) fputs("...", file);
+    fputc('\n', file);
+    fclose(file);
+    traceCount++;
+}
+#endif
+
 static RValue builtin_drawText(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
     Runner* runner = (Runner*) ctx->runner;
     if (runner->renderer == nullptr) return RValue_makeUndefined();
@@ -7233,6 +7287,18 @@ static RValue builtin_drawTextTransformed(VMContext* ctx, RValue* args, MAYBE_UN
 
     PreprocessedText processedText = TextUtils_preprocessGmlTextIfNeeded(runner, str);
     float dialogueTextScale = builtin_get3DSTopEnemyDialogueTextScale(runner);
+#ifdef __3DS__
+    builtin_trace3DSTransformedText(
+        ctx,
+        "draw_text_transformed",
+        processedText.text,
+        x,
+        y,
+        xscale * dialogueTextScale,
+        yscale * dialogueTextScale,
+        angle
+    );
+#endif
 #ifdef __3DS__
     builtin_trace3DSDialogueText(ctx, processedText.text, x, y, dialogueTextScale);
 #endif
@@ -7292,6 +7358,18 @@ static RValue builtin_drawTextExtTransformed(VMContext* ctx, RValue* args, MAYBE
 
     PreprocessedText processedText = TextUtils_preprocessGmlTextIfNeeded(runner, str);
     float dialogueTextScale = builtin_get3DSTopEnemyDialogueTextScale(runner);
+#ifdef __3DS__
+    builtin_trace3DSTransformedText(
+        ctx,
+        "draw_text_ext_transformed",
+        processedText.text,
+        x,
+        y,
+        xscale * dialogueTextScale,
+        yscale * dialogueTextScale,
+        angle
+    );
+#endif
 #ifdef __3DS__
     builtin_trace3DSDialogueText(ctx, processedText.text, x, y, dialogueTextScale);
 #endif
@@ -7358,6 +7436,18 @@ static RValue builtin_drawTextColorTransformed(VMContext* ctx, RValue* args, MAY
     PreprocessedText processedText = TextUtils_preprocessGmlTextIfNeeded(runner, str);
     float dialogueTextScale = builtin_get3DSTopEnemyDialogueTextScale(runner);
 #ifdef __3DS__
+    builtin_trace3DSTransformedText(
+        ctx,
+        "draw_text_color_transformed",
+        processedText.text,
+        x,
+        y,
+        xscale * dialogueTextScale,
+        yscale * dialogueTextScale,
+        angle
+    );
+#endif
+#ifdef __3DS__
     builtin_trace3DSDialogueText(ctx, processedText.text, x, y, dialogueTextScale);
 #endif
     runner->renderer->vtable->drawTextColor(runner->renderer, processedText.text, x, y, xscale * dialogueTextScale, yscale * dialogueTextScale, angle, c1, c2, c3, c4, alpha);
@@ -7421,6 +7511,18 @@ static RValue builtin_drawTextColorExtTransformed(VMContext* ctx, RValue* args, 
 
     PreprocessedText processedText = TextUtils_preprocessGmlTextIfNeeded(runner, str);
     float dialogueTextScale = builtin_get3DSTopEnemyDialogueTextScale(runner);
+#ifdef __3DS__
+    builtin_trace3DSTransformedText(
+        ctx,
+        "draw_text_color_ext_transformed",
+        processedText.text,
+        x,
+        y,
+        xscale * dialogueTextScale,
+        yscale * dialogueTextScale,
+        angle
+    );
+#endif
 #ifdef __3DS__
     builtin_trace3DSDialogueText(ctx, processedText.text, x, y, dialogueTextScale);
 #endif
