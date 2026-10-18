@@ -44,7 +44,7 @@ function Convert-ToMsysPath {
 
 function Quote-Bash {
     param([string]$Text)
-    return "'" + $Text.Replace("'", "'""'""'") + "'"
+    return "'" + $Text.Replace("'", "'\''") + "'"
 }
 
 function Get-TreeFingerprint {
@@ -271,8 +271,8 @@ $manifest = [ordered]@{
     smdhtool = $smdhTool
     romfs_enabled = (-not $NoRomfs)
     romfs_asset_dir = $assetPath
-    romfs_asset_file_count = if ($assetFingerprint) { $assetFingerprint.file_count } else { 0 }
-    romfs_asset_tree_sha256 = if ($assetFingerprint) { $assetFingerprint.sha256 } else { $null }
+    romfs_asset_file_count = $(if ($assetFingerprint) { $assetFingerprint.file_count } else { 0 })
+    romfs_asset_tree_sha256 = $(if ($assetFingerprint) { $assetFingerprint.sha256 } else { $null })
     preprocess_manifest_sha256 = $preprocessManifestHash
     cinnamon_3dsx = $threeDsx
     cinnamon_3dsx_sha256 = $threeDsxHash
