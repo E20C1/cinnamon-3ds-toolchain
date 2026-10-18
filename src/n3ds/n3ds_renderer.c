@@ -3485,11 +3485,13 @@ static void N3DSRenderer_init(Renderer* base, DataWin* dataWin) {
     (void) N3DSRenderer_loadPackedDirectAssets(renderer);
     (void) N3DSRenderer_loadRoomManifest(renderer);
     renderer->atlasTraceMask = safeCalloc(renderer->atlasItemCount > 0 ? renderer->atlasItemCount : 1u, sizeof(uint8_t));
+#if N3DS_ENABLE_LOGGING
     renderer->atlasTraceFile = fopen(N3DS_ATLAS_TRACE_LOG_PATH, "wb");
     if (renderer->atlasTraceFile != NULL) {
         fprintf(renderer->atlasTraceFile, "N3DS atlas trace start\n");
         fflush(renderer->atlasTraceFile);
     }
+#endif
     N3DSRenderer_preloadFontPages(renderer);
     C2D_SetTintMode(C2D_TintMult);
     fprintf(
