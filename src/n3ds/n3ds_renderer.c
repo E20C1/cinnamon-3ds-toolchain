@@ -88,8 +88,6 @@ static FILE* N3DSRenderer_getDialogueTraceFile(void) {
     return gN3DSDialogueRenderTraceFile;
 }
 
-static bool N3DSRenderer_shouldTraceBattleDraw(const struct N3DSRenderer* renderer);
-
 typedef struct {
     uint16_t width;
     uint16_t height;
