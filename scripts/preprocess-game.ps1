@@ -57,6 +57,17 @@ function Resolve-Executable {
 }
 
 $dataWinPath = Resolve-LocalPath -Path $DataWin -Base (Get-Location).Path
+if (Test-Path -LiteralPath $dataWinPath -PathType Container) {
+    $directoryInput = (Resolve-Path -LiteralPath $dataWinPath).Path
+    $candidate = Join-Path $directoryInput "data.win"
+    if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+        Write-Host "DataWin points to a directory; using: $candidate"
+        $dataWinPath = $candidate
+    } else {
+        throw "DataWin points to a directory, but data.win was not found inside it: $directoryInput"
+    }
+}
+
 if (-not (Test-Path -LiteralPath $dataWinPath -PathType Leaf)) {
     throw "data.win was not found: $dataWinPath"
 }
