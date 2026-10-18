@@ -691,8 +691,14 @@ int main(int argc, char** argv) {
     // running on hardware while diagnosing transformed Japanese text.
     FILE* buildMarker = fopen("sdmc:/3ds/cinnamon/build_marker.txt", "wb");
     if (buildMarker != NULL) {
-        fputs("cinnamon-3ds transformed-text probe v1\n", buildMarker);
+        fputs("cinnamon-3ds battle-glyph probe v2\n", buildMarker);
         fclose(buildMarker);
+    }
+
+    FILE* battleGlyphProbe = fopen("sdmc:/3ds/cinnamon/battle_glyph_probe.log", "wb");
+    if (battleGlyphProbe != NULL) {
+        fputs("Cinnamon 3DS battle glyph probe v2\n", battleGlyphProbe);
+        fclose(battleGlyphProbe);
     }
 
     char* dataWinPath = chooseDataWinPath();
