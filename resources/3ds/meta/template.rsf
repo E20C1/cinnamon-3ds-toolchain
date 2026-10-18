@@ -3,9 +3,9 @@ BasicInfo:
   ProductCode             : $(APP_PRODUCT_CODE)
   Logo                    : Nintendo # Nintendo / Licensed / Distributed / iQue / iQueForSystem
 
-#RomFs:
-  # Specifies the root path of the read only file system to include in the ROM.
-  #RootPath                : $(APP_ROMFS)
+RomFs:
+  # Self-contained CIA: generated 3DS assets and the user's local data.win.
+  RootPath                 : $(APP_ROMFS)
 
 TitleInfo:
   Category                : Application
@@ -59,7 +59,7 @@ AccessControlInfo:
 
   # Process Settings
   MemoryType                    : Application # Application/System/Base
-  #SystemMode                    : $(APP_SYSTEM_MODE) # 64MB(Default)/96MB/80MB/72MB/32MB
+  SystemMode                     : $(APP_SYSTEM_MODE) # 64MB(Default)/96MB/80MB/72MB/32MB
   IdealProcessor                : 0
   AffinityMask                  : 1
   Priority                      : 16
@@ -76,16 +76,16 @@ AccessControlInfo:
   SpecialMemoryArrange          : false
 
   # New3DS Exclusive Process Settings
-  #SystemModeExt                 : Legacy # Legacy(Default)/124MB/178MB  Legacy:Use Old3DS SystemMode
-  #CpuSpeed                      : 268MHz # 256MHz(Default)/804MHz
-  #EnableL2Cache                 : false # false(default)/true
-  #CanAccessCore2                : false 
+  SystemModeExt                  : $(APP_SYSTEM_MODE_EXT) # Legacy/124MB/178MB
+  CpuSpeed                       : $(APP_CPU_SPEED) # 268MHz/804MHz
+  EnableL2Cache                  : $(APP_ENABLE_L2_CACHE)
+  CanAccessCore2                 : $(APP_CAN_ACCESS_CORE2)
 
   # Virtual Address Mappings
-  #IORegisterMapping:
-  # - 1ff00000-1ff7ffff   # DSP memory
-  #MemoryMapping: 
-  # - 1f000000-1f5fffff:r # VRAM
+  IORegisterMapping:
+   - 1ff00000-1ff7ffff   # DSP memory
+  MemoryMapping:
+   - 1f000000-1f5fffff:r # VRAM
 
   # Accessible SVCs, <Name>:<ID>
   SystemCallAccess: 
