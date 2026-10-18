@@ -4925,9 +4925,7 @@ static void N3DSRenderer_traceJapaneseGlyphBounds(
     float effectiveXScale, float effectiveYScale, float angleDeg
 ) {
     if (renderer->activeSceneTarget != N3DS_SCENE_TARGET_TOP ||
-        text == NULL || font->name == NULL ||
-        strncmp(font->name, "fnt_ja_", 7) != 0 ||
-        strlen(text) != 3u) return;
+        text == NULL || strlen(text) != 3u) return;
 
     int32_t pos = 0;
     uint16_t ch = TextUtils_decodeUtf8(text, 3, &pos);
@@ -5003,7 +5001,7 @@ static void N3DSRenderer_traceJapaneseGlyphBounds(
     fprintf(
         file,
         "char=U+%04X font=%ld:%s spriteFont=%d xy=%.2f,%.2f arg=%.3f,%.3f fontScale=%.3f,%.3f eff=%.3f,%.3f view=%.3f,%.3f glyph=%ux%u off=%d asc=%d stride=%.2f align=%ld,%ld angle=%.2f localTop=%.2f screenX=%.2f screenTop=%.2f screenBottom=%.2f screenHeight=%.2f over240=%d\n",
-        (unsigned int) ch, (long) base->drawFont, font->name, font->isSpriteFont ? 1 : 0,
+        (unsigned int) ch, (long) base->drawFont, font->name != NULL ? font->name : "<unnamed>", font->isSpriteFont ? 1 : 0,
         (double) x, (double) y, (double) argScaleX, (double) argScaleY,
         (double) font->scaleX, (double) font->scaleY,
         (double) effectiveXScale, (double) effectiveYScale,
