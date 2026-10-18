@@ -151,7 +151,13 @@ function Ensure-HostToolchain {
 function Get-DevkitProRequiredPaths {
     return @(
         "C:\devkitPro\tools\bin\tex3ds.exe",
+        "C:\devkitPro\tools\bin\3dsxtool.exe",
+        "C:\devkitPro\tools\bin\smdhtool.exe",
         "C:\devkitPro\devkitARM\bin\arm-none-eabi-gcc.exe",
+        "C:\devkitPro\portlibs\3ds\bin\arm-none-eabi-cmake",
+        "C:\devkitPro\msys2\usr\bin\bash.exe",
+        "C:\devkitPro\msys2\usr\bin\cygpath.exe",
+        "C:\devkitPro\msys2\usr\bin\make.exe",
         "C:\devkitPro\libctru",
         "C:\devkitPro\cmake\3DS.cmake",
         "C:\devkitPro\libctru\lib\libcitro2d.a",
@@ -259,7 +265,13 @@ function Write-EnvironmentSummary {
         "Host GCC" = (Test-HostCompiler)
         "Host Ninja" = (Test-HostNinja)
         "tex3ds" = (Test-Path -LiteralPath "C:\devkitPro\tools\bin\tex3ds.exe")
+        "3dsxtool" = (Test-Path -LiteralPath "C:\devkitPro\tools\bin\3dsxtool.exe")
+        "smdhtool" = (Test-Path -LiteralPath "C:\devkitPro\tools\bin\smdhtool.exe")
         "devkitARM" = (Test-Path -LiteralPath "C:\devkitPro\devkitARM\bin\arm-none-eabi-gcc.exe")
+        "3DS CMake wrapper" = (Test-Path -LiteralPath "C:\devkitPro\portlibs\3ds\bin\arm-none-eabi-cmake")
+        "DKP bash" = (Test-Path -LiteralPath "C:\devkitPro\msys2\usr\bin\bash.exe")
+        "DKP cygpath" = (Test-Path -LiteralPath "C:\devkitPro\msys2\usr\bin\cygpath.exe")
+        "DKP make" = (Test-Path -LiteralPath "C:\devkitPro\msys2\usr\bin\make.exe")
         "libctru" = (Test-Path -LiteralPath "C:\devkitPro\libctru")
         "3DS.cmake" = (Test-Path -LiteralPath "C:\devkitPro\cmake\3DS.cmake")
         "citro2d" = (Test-Path -LiteralPath "C:\devkitPro\libctru\lib\libcitro2d.a")
