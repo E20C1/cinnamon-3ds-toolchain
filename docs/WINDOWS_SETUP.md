@@ -117,3 +117,13 @@ C:\devkitPro\libctru\lib\libcitro3d.a
 ```
 
 They are not expected under `C:\devkitPro\portlibs\3ds\lib` in this toolchain layout.
+
+## Native Windows CMake
+
+Host-side preprocessing uses the native Kitware Windows CMake executable, normally:
+
+```text
+C:\Program Files\CMake\bin\cmake.exe
+```
+
+The CMake executable bundled under `C:\devkitPro\msys2\usr\bin` is an MSYS-oriented executable. It is valid inside the devkitPro/MSYS environment, but it must not be selected for the Windows host preprocessor wrapper because native `C:\...\` source/build paths can be reinterpreted as MSYS paths. The bootstrap therefore treats native Kitware CMake and devkitPro/MSYS2 CMake as different tools.
