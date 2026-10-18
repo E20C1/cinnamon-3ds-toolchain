@@ -144,7 +144,40 @@ if (-not $Generator) {
     throw "A supported host build generator was not found. Install Ninja or pass -Generator and -MakeProgram explicitly."
 }
 
+# MSYS2 MinGW/UCRT compilers rely on sibling tools/DLLs being reachable through PATH
+# when launched from native Windows CMake/PowerShell. Add the selected tool directories
+# explicitly so gcc can find cc1/as/ld and their runtime DLLs.
+$hostToolDirs = @(
+    (Split-Path -Parent $compiler)
+)
+if ($makeTool) {
+    $hostToolDirs += (Split-Path -Parent $makeTool)
+}
+$hostToolDirs = $hostToolDirs | Select-Object -Unique
+foreach ($dir in [array]::Reverse([object[]]$hostToolDirs.Clone())) {
+    if ($dir -and (($env:PATH -split ';') -notcontains $dir)) {
+        $env:PATH = "$dir;$env:PATH"
+    }
+}
+
+Write-Host "Checking host C compiler..."
+& $compiler --version | Select-Object -First 1 | Write-Host
+if ($LASTEXITCODE -ne 0) {
+    throw "Host C compiler failed to start with exit code $LASTEXITCODE: $compiler"
+}
+
 New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
+
+# Clear CMake's toolchain detection cache. This build directory may previously have
+# been configured by another CMake/compiler combination.
+$cachePathForReset = Join-Path $BuildDir "CMakeCache.txt"
+$cmakeFilesForReset = Join-Path $BuildDir "CMakeFiles"
+if (Test-Path -LiteralPath $cachePathForReset) {
+    Remove-Item -LiteralPath $cachePathForReset -Force
+}
+if (Test-Path -LiteralPath $cmakeFilesForReset) {
+    Remove-Item -LiteralPath $cmakeFilesForReset -Recurse -Force
+}
 
 $configureArgs = @(
     "-S", $sourceDir,
