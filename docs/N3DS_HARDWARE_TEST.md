@@ -111,3 +111,14 @@ A successful build alone does not complete Milestone 2. Hardware acceptance is r
 Milestone 2 hardware acceptance has been reached on a New Nintendo 3DS-family system. The validated build launches successfully through the Homebrew Launcher, loads the locally supplied `data.win`, reaches playable UNDERTALE scenes, allows the game's Japanese language setting, and produces working music / game audio after DSP firmware setup.
 
 The first pass also confirmed a rendering issue to address next: Japanese glyphs are present and mapped correctly, but dense strokes become hard to read in the enemy battle-dialogue bubble. A filter-only experiment did not materially improve readability, while ordinary Japanese dialogue is substantially clearer, pointing to the battle-dialogue effective pixel size as the dominant issue. The current experiment enlarges only non-ASCII text during the special top-screen enemy-dialogue pass.
+
+
+## Japanese battle-dialogue resolution diagnosis
+
+The high-volume hardware trace captured the previously unreadable Flowey/tutorial bubble. The problematic text is not a sprite and not a missing-glyph problem. It is rendered through the normal font path using `fnt_ja_plain` (font 17, TPAG 6547).
+
+The captured bubble occupies logical coordinates roughly `x=405..548`, `y=144..204`, while the renderer reports `viewScale=0.500,0.500`. In contrast, the readable Japanese main-text path uses `fnt_ja_maintext` at `viewScale=1.000,1.000`.
+
+That means the dense Japanese glyphs in the battle bubble are physically rasterized at about half their logical pixel size on the 3DS top screen. The diagnostic build also generated thousands of synchronous SD-card log writes, explaining the severe temporary slowdown.
+
+The current targeted fix enlarges only the identified `fnt_ja_plain` half-resolution bubble by 1.5x around its observed center and forces nearest-neighbor texture filtering. Per-glyph diagnostic SD logging is disabled for the next hardware pass.
