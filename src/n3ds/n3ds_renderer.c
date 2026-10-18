@@ -4958,49 +4958,6 @@ static void N3DSRenderer_drawTextCommon(Renderer* base, const char* text, float 
         renderer->textLinearFilterActive = true;
     }
 
-    // The earlier full hardware trace captured the exact oversized Japanese
-    // emphasis animation: fnt_ja_maintext renders a single UTF-8 glyph while
-    // xscale/yscale ramp from about 1.0 to 3.4. A later narrow diagnostic gated
-    // on scene-target state produced no records, so do not make this correction
-    // depend on activeSceneTarget. Limit it to transformed single-glyph
-    // fnt_ja_maintext calls instead; normal dialogue and shake-only movement
-    // remain untouched.
-    bool useJapaneseTopScreenScaleCap =
-        font->name != NULL &&
-        strcmp(font->name, "fnt_ja_maintext") == 0 &&
-        text != NULL &&
-        strlen(text) <= 4u &&
-        (fabsf(xscale) > 1.05f || fabsf(yscale) > 1.05f);
-
-    if (useJapaneseTopScreenScaleCap) {
-        const float cappedArgScale = 1.10f;
-        float originalArgScale = fmaxf(fabsf(xscale), fabsf(yscale));
-
-        // Preserve the sign of any transformed scale, but clamp the magnitude to
-        // the traced bubble-safe size. fnt_ja_maintext has font scale 1.0 in the
-        // captured UNDERTALE build, so this maps directly to effective scale.
-        effectiveXScale = copysignf(
-            fminf(fabsf(effectiveXScale), cappedArgScale * fabsf(font->scaleX)),
-            effectiveXScale
-        );
-        effectiveYScale = copysignf(
-            fminf(fabsf(effectiveYScale), cappedArgScale * fabsf(font->scaleY)),
-            effectiveYScale
-        );
-
-        // The full trace shows the animation path is approximately:
-        //   x = 134.70 - 16.70 * scale
-        //   y =  19.44 + 25.02 * scale
-        // Reproject the capped glyph to the same authored path at scale 1.10.
-        // This corrects both the size and the downward drift that caused the
-        // glyph to escape the speech bubble.
-        if (originalArgScale > cappedArgScale) {
-            x = 134.70f - 16.70f * cappedArgScale;
-            y = 19.44f + 25.02f * cappedArgScale;
-        }
-
-        renderer->textLinearFilterActive = true;
-    }
     N3DSRenderer_traceBattleText(
         renderer,
         base,
