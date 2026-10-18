@@ -51,6 +51,16 @@ Copy-Item -LiteralPath $dataWinPath -Destination $stagedDataWin -Force
 $threeDsxHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $staged3dsx).Hash.ToLowerInvariant()
 $dataWinHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $stagedDataWin).Hash.ToLowerInvariant()
 
+$buildManifestPath = Join-Path $repoRoot "build\repro\n3ds-build.json"
+if (Test-Path -LiteralPath $buildManifestPath -PathType Leaf) {
+    $buildManifest = Get-Content -LiteralPath $buildManifestPath -Raw | ConvertFrom-Json
+    $expected3dsxHash = ([string]$buildManifest.cinnamon_3dsx_sha256).ToLowerInvariant()
+    if ($expected3dsxHash -and $expected3dsxHash -ne $threeDsxHash) {
+        throw "The staged cinnamon.3dsx does not match build\repro\n3ds-build.json. Expected $expected3dsxHash, got $threeDsxHash."
+    }
+    Write-Host "[OK] cinnamon.3dsx matches build\repro\n3ds-build.json."
+}
+
 $manifestDir = Join-Path $repoRoot "build\repro"
 New-Item -ItemType Directory -Force -Path $manifestDir | Out-Null
 $manifestPath = Join-Path $manifestDir "n3ds-sd-stage.json"
