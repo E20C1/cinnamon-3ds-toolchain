@@ -687,27 +687,6 @@ int main(int argc, char** argv) {
     mkdir("sdmc:/3ds", 0777);
     mkdir("sdmc:/3ds/cinnamon", 0777);
 
-    // Temporary deterministic marker used to prove which 3DSX is actually
-    // running on hardware while diagnosing transformed Japanese text.
-    FILE* buildMarker = fopen("sdmc:/3ds/cinnamon/build_marker.txt", "wb");
-    if (buildMarker != NULL) {
-        fputs("cinnamon-3ds VM kana-ne metadata probe v4\n", buildMarker);
-        fclose(buildMarker);
-    }
-
-    FILE* battleGlyphProbe = fopen("sdmc:/3ds/cinnamon/battle_glyph_probe.log", "wb");
-    if (battleGlyphProbe != NULL) {
-        fputs("Cinnamon 3DS battle glyph probe v2\n", battleGlyphProbe);
-        fclose(battleGlyphProbe);
-    }
-
-    // Bounded, deduplicated renderer measurements. Reset on each launch.
-    FILE* glyphBoundsProbe = fopen("sdmc:/3ds/cinnamon/glyph_bounds_probe.log", "wb");
-    if (glyphBoundsProbe != NULL) {
-        fputs("Cinnamon 3DS VM kana-ne metadata probe v4\n", glyphBoundsProbe);
-        fclose(glyphBoundsProbe);
-    }
-
     char* dataWinPath = chooseDataWinPath();
 
     N3DSLoadingScreen loadingScreen = {0};
