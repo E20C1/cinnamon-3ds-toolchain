@@ -230,6 +230,18 @@ if (-not (Test-Path -LiteralPath $assetPath -PathType Container)) {
     throw "Generated asset directory was not found: $assetPath"
 }
 
+$requiredRuntimeAssets = @(
+    "gfx\atlas.bin",
+    "gfx\direct_assets.bin",
+    "audio\sound_bank.bin"
+)
+foreach ($relative in $requiredRuntimeAssets) {
+    $requiredPath = Join-Path $assetPath $relative
+    if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
+        throw "Required preprocessed CIA asset is missing: $requiredPath"
+    }
+}
+
 $metadataPath = Join-Path $assetPath "game_metadata.json"
 if (-not (Test-Path -LiteralPath $metadataPath -PathType Leaf)) {
     throw "GameMaker metadata was not found: $metadataPath. Rebuild the host preprocessor and run again."
@@ -338,11 +350,13 @@ try {
     Copy-Item -LiteralPath $dataWinPath -Destination (Join-Path $romfsPath "data.win") -Force
 
     Write-Host ""
-    Write-Host "Building self-contained Nintendo 3DS executable..."
+    Write-Host "Building Nintendo 3DS ELF for CIA packaging..."
+    # The CIA's RomFS is attached by makerom below. Avoid making a second
+    # self-contained 3DSX containing the user's proprietary data.win.
     $n3dsArgs = @{
         BuildDir = $appBuildPath
         Configuration = $Configuration
-        AssetDir = $romfsPath
+        NoRomfs = $true
         DisableBottomScreen = $DisableBottomScreen
     }
     & (Join-Path $PSScriptRoot "build-n3ds.ps1") @n3dsArgs
