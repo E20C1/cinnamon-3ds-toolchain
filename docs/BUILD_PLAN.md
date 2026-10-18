@@ -10,7 +10,7 @@ Acceptance: a user-owned UNDERTALE `data.win` can be converted without corruptio
 
 ## Milestone 2: reproduce the inherited 3DSX build
 
-Status: **in progress**. The Windows build wrapper now validates the generated asset tree, passes it as a configurable RomFS root, builds with the devkitPro 3DS CMake toolchain, and records a local 3DS build manifest.
+Status: **build portion completed locally; hardware validation pending**. The Windows build wrapper has produced a Release `cinnamon.3dsx` and `cinnamon.elf` with the generated asset tree embedded as RomFS and recorded the local 3DS build manifest.
 
 Build Cinnamon with `PLATFORM=n3ds` using the generated assets either embedded in RomFS or loaded from `sdmc:/3ds/cinnamon`.
 
