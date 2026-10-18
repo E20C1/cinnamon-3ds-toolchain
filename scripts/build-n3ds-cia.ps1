@@ -7,7 +7,7 @@ param(
     [string]$BuildDir = "build\n3ds-cia",
     [ValidateSet("Release", "Debug", "RelWithDebInfo", "MinSizeRel")]
     [string]$Configuration = "Release",
-    [string]$AssetDir = "build\game-assets\current",
+    [string]$AssetDir = "",
 
     [string]$Preprocessor = "",
     [string]$Tex3ds = "",
@@ -179,7 +179,12 @@ function Test-GamePresetMatch {
 
 $dataWinPath = Resolve-DataWinPath -Path $DataWin
 $buildPath = Resolve-RepoPath -Path $BuildDir
-$assetPath = Resolve-RepoPath -Path $AssetDir
+$usingPrivateAssetDir = -not [bool]$AssetDir
+$assetPath = if ($usingPrivateAssetDir) {
+    Join-Path $buildPath "assets"
+} else {
+    Resolve-RepoPath -Path $AssetDir
+}
 $preprocessorSource = Join-Path $repoRoot "tools\n3ds-preprocess\main.c"
 New-Item -ItemType Directory -Force -Path $buildPath | Out-Null
 
@@ -204,6 +209,12 @@ if ($needsPreprocessorBuild) {
 }
 
 if (-not $SkipPreprocess) {
+    # CIA builds use a private generated-asset tree by default so switching
+    # between GameMaker titles cannot carry stale BCWAV/texture files forward.
+    if ($usingPrivateAssetDir -and (Test-Path -LiteralPath $assetPath)) {
+        Remove-Item -LiteralPath $assetPath -Recurse -Force
+    }
+
     Write-Host ""
     Write-Host "Preprocessing local data.win for Nintendo 3DS..."
     $preprocessArgs = @{
