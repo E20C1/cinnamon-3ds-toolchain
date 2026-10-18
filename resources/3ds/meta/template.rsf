@@ -1,7 +1,7 @@
 BasicInfo:
   Title                   : $(APP_TITLE)
   ProductCode             : $(APP_PRODUCT_CODE)
-  Logo                    : Nintendo # Nintendo / Licensed / Distributed / iQue / iQueForSystem
+  Logo                    : Homebrew # Local homebrew CIA
 
 RomFs:
   # Self-contained CIA: generated 3DS assets and the user's local data.win.
@@ -180,10 +180,12 @@ SystemControlInfo:
   RemasterVersion: 2
   StackSize: 0x40000
 
-  # Modules that run services listed above should be included below
-  # Maximum 48 dependencies
-  # <module name>:<module titleid>
-  #Dependency: 
+  # Modules required by Cinnamon's libctru/Citro/NDSP runtime.
+  # Keeping this list minimal avoids depending on unrelated system modules.
+  Dependency:
+    dsp: 0x0004013000001a02
+    gsp: 0x0004013000001c02
+    hid: 0x0004013000001d02
     #ac: 0x0004013000002402
     #act: 0x0004013000003802
     #am: 0x0004013000001502
@@ -194,11 +196,8 @@ SystemControlInfo:
     #codec: 0x0004013000001802
     #csnd: 0x0004013000002702
     #dlp: 0x0004013000002802
-    #dsp: 0x0004013000001a02
     #friends: 0x0004013000003202
     #gpio: 0x0004013000001b02
-  #  gsp: 0x0004013000001c02
-  #  hid: 0x0004013000001d02
     #http: 0x0004013000002902
     #i2c: 0x0004013000001e02
     #ir: 0x0004013000003302
