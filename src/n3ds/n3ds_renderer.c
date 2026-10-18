@@ -4959,18 +4959,26 @@ static void N3DSRenderer_drawTextCommon(Renderer* base, const char* text, float 
     }
 
     // UNDERTALE sometimes deliberately scales a Japanese glyph to 2x/3x for
-    // emphasis. On the 3DS top screen the 3x case can exceed the speech bubble
-    // even though the effect is valid on the original PC viewport. Preserve the
-    // effect, but cap the final physical scale to 2x. Position is left untouched,
+    // emphasis. In the half-resolution 3DS battle view those logical scales can
+    // still exceed the speech bubble. Preserve the effect, but cap the final
+    // physical scale to the native 1.0x screen size. Position is left untouched,
     // so shake/typewriter effects continue to behave as authored.
     bool useJapaneseTopScreenScaleCap =
         font->name != NULL &&
         strncmp(font->name, "fnt_ja_", 7) == 0 &&
         renderer->activeSceneTarget == N3DS_SCENE_TARGET_TOP &&
+        fabsf(renderer->viewScaleX - 0.5f) < 0.01f &&
+        fabsf(renderer->viewScaleY - 0.5f) < 0.01f &&
         (fabsf(xscale) > 1.5f || fabsf(yscale) > 1.5f);
 
     if (useJapaneseTopScreenScaleCap) {
-        const float maxPhysicalScale = 2.0f;
+        // A physical 2x cap was ineffective here: at viewScale=0.5 the
+        // game's logical 3x glyph is only 1.5x physically, so it never hit that
+        // ceiling. Cap the final on-screen scale to 1.0x instead. Relative to
+        // the readability-tuned normal Japanese text (about 0.625x/0.75x
+        // physically), the emphasis still remains visibly larger without
+        // escaping the speech bubble.
+        const float maxPhysicalScale = 1.0f;
         float absViewScaleX = fabsf(renderer->viewScaleX);
         float absViewScaleY = fabsf(renderer->viewScaleY);
         if (absViewScaleX < 0.001f) absViewScaleX = 1.0f;
