@@ -91,6 +91,7 @@ typedef enum {
     N3DS_TEXFMT_HYBRID = 3,
     N3DS_TEXFMT_L4 = 4,
     N3DS_TEXFMT_LA4 = 5,
+    N3DS_TEXFMT_LA8 = 6,
 } N3DSTextureFormat;
 
 typedef struct {
@@ -847,6 +848,7 @@ static const char* getTex3dsFormatName(N3DSTextureFormat format) {
         case N3DS_TEXFMT_HYBRID: return "etc1a4";
         case N3DS_TEXFMT_L4: return "l4";
         case N3DS_TEXFMT_LA4: return "la4";
+        case N3DS_TEXFMT_LA8: return "la8";
         default: return "etc1a4";
     }
 }
@@ -863,6 +865,7 @@ static const char* getTextureFormatLabel(N3DSTextureFormat format) {
         case N3DS_TEXFMT_HYBRID: return "hybrid";
         case N3DS_TEXFMT_L4: return "l4";
         case N3DS_TEXFMT_LA4: return "la4";
+        case N3DS_TEXFMT_LA8: return "la8";
         default: return "unknown";
     }
 }
@@ -2452,12 +2455,13 @@ static bool emitDirectFontAsset(
     char relativePath[256];
     snprintf(relativePath, sizeof(relativePath), "gfx/fonts/font_%05lu", (unsigned long) fontIndex);
 
-    // Monochrome GameMaker font atlases only need luminance + alpha. LA4 keeps
-    // four alpha bits instead of RGBA5551's single alpha bit, which preserves
-    // thin antialiased Japanese strokes when the 3DS renderer minifies them.
+    // Monochrome GameMaker font atlases only need luminance + alpha. LA8 keeps
+    // the full 8-bit alpha channel at the same 16-bpp storage cost as RGBA5551,
+    // instead of RGBA5551's 1-bit alpha or LA4's 4-bit alpha. This better
+    // preserves thin Japanese strokes after the 3DS half-resolution minification.
     N3DSTextureFormat fontFormat =
         pixelsLookMonochrome(pixels, item->sourceWidth, item->sourceHeight)
-            ? N3DS_TEXFMT_LA4
+            ? N3DS_TEXFMT_LA8
             : N3DS_TEXFMT_RGBA5551;
     bool ok = writeDirectTextureAsset(
         options,
