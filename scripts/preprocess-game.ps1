@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
+    [Alias("InputPath")]
     [string]$DataWin,
 
     [string]$OutputDir = "build\game-assets\current",
