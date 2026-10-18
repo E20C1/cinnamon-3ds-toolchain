@@ -7215,7 +7215,7 @@ static void builtin_trace3DSBattleGlyphText(
     float angle
 ) {
     static uint32_t traceCount = 0u;
-    if (traceCount >= 512u || ctx == NULL || text == NULL) return;
+    if (traceCount >= 48u || ctx == NULL || text == NULL) return;
 
     size_t len = strlen(text);
     if (len == 0u || len > 6u) return;
@@ -7248,7 +7248,8 @@ static void builtin_trace3DSBattleGlyphText(
         strstr(codeName, "flowey") != NULL ||
         strstr(codeName, "battle") != NULL;
     bool transformed = fabsf(xscale - 1.0f) > 0.05f || fabsf(yscale - 1.0f) > 0.05f;
-    if (!dialogueRelated && !transformed) return;
+    // Writer glyphs are drawn every frame; sample only explicitly transformed calls.
+    if (!transformed) return;
 
     FILE* file = fopen("sdmc:/3ds/cinnamon/battle_glyph_probe.log", "a");
     if (file == NULL) return;
