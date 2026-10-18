@@ -8,3 +8,12 @@ resources/3ds/romfs/audio/
 resources/3ds/romfs/borders/
 resources/3ds/romfs/gfx/
 resources/3ds/romfs/*.bcwav
+
+# Proprietary/local GameMaker inputs and generated packages
+**/data.win
+*.cia
+*.3dsx
+*.elf
+
+# Local game input staging
+local-games/
