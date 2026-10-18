@@ -7217,6 +7217,77 @@ static void builtin_trace3DSBattleGlyphText(
     static uint32_t traceCount = 0u;
     if (traceCount >= 48u || ctx == NULL || text == NULL) return;
 
+    // Probe only the problematic kana through the VM path that v2 proved is
+    // active on hardware. Deduplicate before any SD I/O to avoid frame drops.
+    size_t rawLen = strlen(text);
+    if (rawLen == 3u) {
+        int32_t probePos = 0;
+        uint16_t probeCh = TextUtils_decodeUtf8(text, 3, &probePos);
+        if (probePos == 3 && probeCh == 0x306Du) { // ね
+            Runner* probeRunner = (Runner*) ctx->runner;
+            if (probeRunner != NULL && probeRunner->renderer != NULL &&
+                probeRunner->osType == OS_3DS) {
+                int32_t fontIndex = probeRunner->renderer->drawFont;
+                Font* probeFont = NULL;
+                if (fontIndex >= 0 && (uint32_t) fontIndex < probeRunner->dataWin->font.count) {
+                    probeFont = &probeRunner->dataWin->font.fonts[fontIndex];
+                }
+
+                static struct {
+                    int32_t fontIndex;
+                    int32_t xBucket;
+                    int32_t yBucket;
+                } seen[8];
+                static uint32_t seenCount = 0u;
+                int32_t xBucket = (int32_t) floorf(x / 16.0f);
+                int32_t yBucket = (int32_t) floorf(y / 16.0f);
+                bool duplicate = false;
+                for (uint32_t i = 0u; i < seenCount; ++i) {
+                    if (seen[i].fontIndex == fontIndex &&
+                        seen[i].xBucket == xBucket &&
+                        seen[i].yBucket == yBucket) {
+                        duplicate = true;
+                        break;
+                    }
+                }
+
+                if (!duplicate && seenCount < 8u) {
+                    seen[seenCount].fontIndex = fontIndex;
+                    seen[seenCount].xBucket = xBucket;
+                    seen[seenCount].yBucket = yBucket;
+                    seenCount++;
+
+                    FontGlyph* probeGlyph = probeFont != NULL
+                        ? TextUtils_findGlyph(probeFont, probeCh)
+                        : NULL;
+                    FILE* probeFile = fopen("sdmc:/3ds/cinnamon/glyph_bounds_probe.log", "a");
+                    if (probeFile != NULL) {
+                        fprintf(
+                            probeFile,
+                            "VM_NE font=%ld:%s xy=%.2f,%.2f arg=%.3f,%.3f fontScale=%.3f,%.3f glyph=%ux%u off=%d shift=%d asc=%d stride=%.2f api=%s\n",
+                            (long) fontIndex,
+                            (probeFont != NULL && probeFont->name != NULL) ? probeFont->name : "<unnamed>",
+                            (double) x,
+                            (double) y,
+                            (double) xscale,
+                            (double) yscale,
+                            probeFont != NULL ? (double) probeFont->scaleX : 0.0,
+                            probeFont != NULL ? (double) probeFont->scaleY : 0.0,
+                            probeGlyph != NULL ? (unsigned int) probeGlyph->sourceWidth : 0u,
+                            probeGlyph != NULL ? (unsigned int) probeGlyph->sourceHeight : 0u,
+                            probeGlyph != NULL ? (int) probeGlyph->offset : 0,
+                            probeGlyph != NULL ? (int) probeGlyph->shift : 0,
+                            probeFont != NULL ? (int) probeFont->ascenderOffset : 0,
+                            probeFont != NULL ? (double) TextUtils_lineStride(probeFont) : 0.0,
+                            api != NULL ? api : "?"
+                        );
+                        fclose(probeFile);
+                    }
+                }
+            }
+        }
+    }
+
     // Ordinary writer text was responsible for the 512 SD writes in probe v2.
     if (fabsf(xscale - 1.0f) <= 0.05f && fabsf(yscale - 1.0f) <= 0.05f) return;
 
