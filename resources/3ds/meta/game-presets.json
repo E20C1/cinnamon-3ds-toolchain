@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "presets": [
+    {
+      "id": "undertale",
+      "match": {
+        "display_names": ["UNDERTALE", "Undertale"],
+        "names": ["UNDERTALE", "Undertale"],
+        "steam_app_ids": [391540]
+      },
+      "title": "UNDERTALE",
+      "description": "UNDERTALE for Nintendo 3DS",
+      "author": "Toby Fox / Project Sunshine",
+      "product_code": "000400000B0E2A00",
+      "unique_id": "0x01929",
+      "icon": "resources/3ds/meta/icon.png",
+      "banner_image": "resources/3ds/meta/banner.png",
+      "banner_audio": "resources/3ds/meta/audio.wav"
+    }
+  ]
+}
