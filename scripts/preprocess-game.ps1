@@ -145,7 +145,8 @@ if ($LASTEXITCODE -ne 0) {
 $requiredOutputs = @(
     "gfx\atlas.bin",
     "gfx\direct_assets.bin",
-    "audio\sound_bank.bin"
+    "audio\sound_bank.bin",
+    "game_metadata.json"
 )
 $missing = @()
 foreach ($relative in $requiredOutputs) {
