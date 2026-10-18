@@ -6508,6 +6508,56 @@ STUB_RETURN_ZERO(psn_default_user)
 STUB_RETURN_ZERO(psn_get_leaderboard_score)
 
 // Draw functions
+#ifdef __3DS__
+static bool builtin_is3DSBattleWriterInstance(Runner* runner, Instance* inst) {
+    if (runner == NULL || inst == NULL || runner->dataWin == NULL) return false;
+
+    int32_t objectIndex = inst->objectIndex;
+    int32_t depth = 0;
+    while (objectIndex >= 0 &&
+           (uint32_t) objectIndex < runner->dataWin->objt.count &&
+           depth < 32) {
+        GameObject* object = &runner->dataWin->objt.objects[objectIndex];
+        const char* name = object->name;
+        if (name != NULL &&
+            (strcmp(name, "obj_writer") == 0 ||
+             strcmp(name, "obj_writer_quiz") == 0 ||
+             strcmp(name, "obj_healwriter") == 0 ||
+             strcmp(name, "OBJ_WRITER") == 0 ||
+             strcmp(name, "OBJ_NOMSCWRITER") == 0)) {
+            return true;
+        }
+        objectIndex = object->parentId;
+        depth++;
+    }
+
+    return false;
+}
+
+static float builtin_get3DSTopEnemyWriterSpriteScale(VMContext* ctx, float* x, float* y) {
+    Runner* runner = ctx != NULL ? (Runner*) ctx->runner : NULL;
+    Instance* inst =
+        (ctx != NULL && ctx->currentInstance != NULL)
+            ? (Instance*) ctx->currentInstance
+            : NULL;
+
+    if (runner == NULL ||
+        inst == NULL ||
+        runner->osType != OS_3DS ||
+        runner->renderer == NULL ||
+        !runner->n3dsDrawHasTopEnemyDialogue ||
+        !N3DSRenderer_isTopScreenGUIActive(runner->renderer) ||
+        !builtin_is3DSBattleWriterInstance(runner, inst)) {
+        return 1.0f;
+    }
+
+    const float scale = 2.0f;
+    if (x != NULL) *x = (float) inst->x + (*x - (float) inst->x) * scale;
+    if (y != NULL) *y = (float) inst->y + (*y - (float) inst->y) * scale;
+    return scale;
+}
+#endif
+
 static RValue builtin_drawSprite(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
     Runner* runner = (Runner*) ctx->runner;
     if (runner->renderer == nullptr) return RValue_makeUndefined();
@@ -6521,6 +6571,25 @@ static RValue builtin_drawSprite(VMContext* ctx, RValue* args, MAYBE_UNUSED int3
     if (0 > subimg && ctx->currentInstance != nullptr) {
         subimg = (int32_t) ((Instance*) ctx->currentInstance)->imageIndex;
     }
+
+#ifdef __3DS__
+    float dialogueSpriteScale = builtin_get3DSTopEnemyWriterSpriteScale(ctx, &x, &y);
+    if (dialogueSpriteScale != 1.0f) {
+        Renderer_drawSpriteExt(
+            runner->renderer,
+            spriteIndex,
+            subimg,
+            x,
+            y,
+            dialogueSpriteScale,
+            dialogueSpriteScale,
+            0.0f,
+            0xFFFFFF,
+            runner->renderer->drawAlpha
+        );
+        return RValue_makeUndefined();
+    }
+#endif
 
     Renderer_drawSprite(runner->renderer, spriteIndex, subimg, x, y);
     return RValue_makeUndefined();
@@ -6543,6 +6612,12 @@ static RValue builtin_drawSpriteExt(VMContext* ctx, RValue* args, MAYBE_UNUSED i
     if (0 > subimg && ctx->currentInstance != nullptr) {
         subimg = (int32_t) ((Instance*) ctx->currentInstance)->imageIndex;
     }
+
+#ifdef __3DS__
+    float dialogueSpriteScale = builtin_get3DSTopEnemyWriterSpriteScale(ctx, &x, &y);
+    xscale *= dialogueSpriteScale;
+    yscale *= dialogueSpriteScale;
+#endif
 
     Renderer_drawSpriteExt(runner->renderer, spriteIndex, subimg, x, y, xscale, yscale, rot, color, alpha);
     return RValue_makeUndefined();
