@@ -687,6 +687,14 @@ int main(int argc, char** argv) {
     mkdir("sdmc:/3ds", 0777);
     mkdir("sdmc:/3ds/cinnamon", 0777);
 
+    // Temporary deterministic marker used to prove which 3DSX is actually
+    // running on hardware while diagnosing transformed Japanese text.
+    FILE* buildMarker = fopen("sdmc:/3ds/cinnamon/build_marker.txt", "wb");
+    if (buildMarker != NULL) {
+        fputs("cinnamon-3ds transformed-text probe v1\n", buildMarker);
+        fclose(buildMarker);
+    }
+
     char* dataWinPath = chooseDataWinPath();
 
     N3DSLoadingScreen loadingScreen = {0};
