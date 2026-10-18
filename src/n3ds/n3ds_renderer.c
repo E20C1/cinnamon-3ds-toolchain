@@ -491,7 +491,16 @@ static void N3DSRenderer_traceBattleText(
     float effectiveXScale,
     float effectiveYScale
 ) {
-    if (!N3DSRenderer_shouldTraceBattleDraw(renderer)) return;
+    bool containsNonAscii = false;
+    if (text != NULL) {
+        for (const unsigned char* p = (const unsigned char*) text; *p != '\0'; ++p) {
+            if (*p >= 0x80u) {
+                containsNonAscii = true;
+                break;
+            }
+        }
+    }
+    if (!containsNonAscii && !N3DSRenderer_shouldTraceBattleDraw(renderer)) return;
     FILE* file = N3DSRenderer_getDialogueTraceFile();
     if (file == NULL) return;
 
