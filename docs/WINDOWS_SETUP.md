@@ -127,3 +127,9 @@ C:\Program Files\CMake\bin\cmake.exe
 ```
 
 The CMake executable bundled under `C:\devkitPro\msys2\usr\bin` is an MSYS-oriented executable. It is valid inside the devkitPro/MSYS environment, but it must not be selected for the Windows host preprocessor wrapper because native `C:\...\` source/build paths can be reinterpreted as MSYS paths. The bootstrap therefore treats native Kitware CMake and devkitPro/MSYS2 CMake as different tools.
+
+## 3DS build tools verified by the bootstrap
+
+In addition to the host preprocessor dependencies, the bootstrap verifies the devkitPro pieces used by the reproducible 3DSX wrapper: `3dsxtool`, `smdhtool`, the 3DS `arm-none-eabi-cmake` wrapper, MSYS2 `bash` / `cygpath` / `make`, devkitARM GCC, libctru, citro2d, citro3d, and `3DS.cmake`.
+
+After preprocessing succeeds, continue with `build-new3ds.cmd` or `.\build-windows-n3ds.ps1`. See [N3DS_BUILD.md](N3DS_BUILD.md).
