@@ -4,7 +4,9 @@ param(
     [ValidateSet("Release", "Debug", "RelWithDebInfo", "MinSizeRel")]
     [string]$Configuration = "Release",
     [string]$CMakeExe = "",
-    [string]$Generator = ""
+    [string]$Generator = "",
+    [string]$HostCompiler = "",
+    [string]$MakeProgram = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -62,18 +64,236 @@ if (-not $cmake) {
     throw "CMake was not found. Install CMake or pass -CMakeExe <path>."
 }
 
+$compiler = Resolve-Executable `
+    -ExplicitPath $HostCompiler `
+    -CommandNames @("gcc.exe", "gcc", "clang.exe", "clang") `
+    -FallbackPaths @(
+        "C:\devkitPro\msys2\ucrt64\bin\gcc.exe",
+        "C:\devkitPro\msys2\mingw64\bin\gcc.exe",
+        "C:\devkitPro\msys2\clang64\bin\clang.exe"
+    )
+
+if (-not $compiler) {
+    throw @"
+A Windows host C compiler was not found.
+
+For the devkitPro/MSYS2 environment used by this project, install the UCRT64
+host toolchain with:
+
+  & "C:\devkitPro\msys2\usr\bin\pacman.exe" -S --needed mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-ninja
+
+Then rerun this script. You may also pass -HostCompiler <path>.
+"@
+}
+
+$makeTool = Resolve-Executable `
+    -ExplicitPath $MakeProgram `
+    -CommandNames @("ninja.exe", "ninja", "mingw32-make.exe", "mingw32-make") `
+    -FallbackPaths @(
+        "C:\devkitPro\msys2\ucrt64\bin\ninja.exe",
+        "C:\devkitPro\msys2\mingw64\bin\ninja.exe",
+        "C:\devkitPro\msys2\ucrt64\bin\mingw32-make.exe",
+        "C:\devkitPro\msys2\mingw64\bin\mingw32-make.exe"
+    )
+
 if (-not $Generator) {
     if ($env:CINNAMON_HOST_CMAKE_GENERATOR) {
         $Generator = $env:CINNAMON_HOST_CMAKE_GENERATOR
-    } elseif (Get-Command ninja.exe -ErrorAction SilentlyContinue) {
+    } elseif ($makeTool -and ([System.IO.Path]::GetFileName($makeTool) -match '^ninja(\.exe)?
+
+$configureArgs = @(
+    "-S", $sourceDir,
+    "-B", $BuildDir,
+    "-DCMAKE_BUILD_TYPE=$Configuration",
+    "-DCMAKE_C_COMPILER=$compiler"
+)
+if ($Generator) {
+    $configureArgs += @("-G", $Generator)
+}
+if ($makeTool) {
+    $configureArgs += "-DCMAKE_MAKE_PROGRAM=$makeTool"
+}
+
+Write-Host "Configuring n3ds-preprocess..."
+Write-Host "  CMake: $cmake"
+Write-Host "  Source: $sourceDir"
+Write-Host "  Build:  $BuildDir"
+Write-Host "  Compiler: $compiler"
+Write-Host "  Generator: $Generator"
+if ($makeTool) {
+    Write-Host "  Make tool: $makeTool"
+}
+
+& $cmake @configureArgs
+if ($LASTEXITCODE -ne 0) {
+    throw "CMake configure failed with exit code $LASTEXITCODE."
+}
+
+& $cmake --build $BuildDir --config $Configuration
+if ($LASTEXITCODE -ne 0) {
+    throw "CMake build failed with exit code $LASTEXITCODE."
+}
+
+$candidates = @(
+    (Join-Path $BuildDir "n3ds-preprocess.exe"),
+    (Join-Path $BuildDir "$Configuration\n3ds-preprocess.exe"),
+    (Join-Path $BuildDir "n3ds-preprocess")
+)
+$preprocessor = $candidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+if (-not $preprocessor) {
+    $preprocessor = Get-ChildItem -LiteralPath $BuildDir -Recurse -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -eq "n3ds-preprocess.exe" -or $_.Name -eq "n3ds-preprocess" } |
+        Sort-Object LastWriteTimeUtc -Descending |
+        Select-Object -First 1 -ExpandProperty FullName
+}
+if (-not $preprocessor) {
+    throw "The build completed but n3ds-preprocess could not be located under $BuildDir."
+}
+
+$preprocessor = (Resolve-Path -LiteralPath $preprocessor).Path
+$preprocessorHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $preprocessor).Hash.ToLowerInvariant()
+
+$gitCommit = $null
+$git = Get-Command git -ErrorAction SilentlyContinue
+if ($git) {
+    $gitCommit = (& $git.Source -C $repoRoot rev-parse HEAD 2>$null)
+    if ($LASTEXITCODE -ne 0) { $gitCommit = $null }
+}
+
+$cmakeVersion = (& $cmake --version | Select-Object -First 1)
+$configuredCompiler = $compiler
+$cachePath = Join-Path $BuildDir "CMakeCache.txt"
+if (Test-Path -LiteralPath $cachePath) {
+    $compilerLine = Get-Content -LiteralPath $cachePath |
+        Where-Object { $_ -match '^CMAKE_C_COMPILER:(FILEPATH|STRING)=' } |
+        Select-Object -First 1
+    if ($compilerLine) {
+        $configuredCompiler = ($compilerLine -split '=', 2)[1]
+    }
+}
+
+$manifestDir = Join-Path $repoRoot "build\repro"
+New-Item -ItemType Directory -Force -Path $manifestDir | Out-Null
+$manifestPath = Join-Path $manifestDir "preprocessor-build.json"
+
+$manifest = [ordered]@{
+    repository_commit = $gitCommit
+    configuration = $Configuration
+    generator = $Generator
+    cmake = $cmake
+    cmake_version = $cmakeVersion
+    c_compiler = $configuredCompiler
+    executable = $preprocessor
+    executable_sha256 = $preprocessorHash
+    generated_utc = [DateTime]::UtcNow.ToString("o")
+}
+$manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
+
+Write-Host ""
+Write-Host "n3ds-preprocess build completed." -ForegroundColor Green
+Write-Host "Executable: $preprocessor"
+Write-Host "SHA-256:   $preprocessorHash"
+Write-Host "Manifest:  $manifestPath"
+)) {
         $Generator = "Ninja"
-    } elseif (Get-Command ninja -ErrorAction SilentlyContinue) {
-        $Generator = "Ninja"
-    } elseif (Get-Command mingw32-make.exe -ErrorAction SilentlyContinue) {
-        $Generator = "MinGW Makefiles"
-    } elseif (Get-Command mingw32-make -ErrorAction SilentlyContinue) {
+    } elseif ($makeTool -and ([System.IO.Path]::GetFileName($makeTool) -match '^mingw32-make(\.exe)?
+
+$configureArgs = @(
+    "-S", $sourceDir,
+    "-B", $BuildDir,
+    "-DCMAKE_BUILD_TYPE=$Configuration"
+)
+if ($Generator) {
+    $configureArgs += @("-G", $Generator)
+}
+
+Write-Host "Configuring n3ds-preprocess..."
+Write-Host "  CMake: $cmake"
+Write-Host "  Source: $sourceDir"
+Write-Host "  Build:  $BuildDir"
+if ($Generator) {
+    Write-Host "  Generator: $Generator"
+} else {
+    Write-Warning "No host generator was selected explicitly; CMake will use its platform default."
+}
+
+& $cmake @configureArgs
+if ($LASTEXITCODE -ne 0) {
+    throw "CMake configure failed with exit code $LASTEXITCODE."
+}
+
+& $cmake --build $BuildDir --config $Configuration
+if ($LASTEXITCODE -ne 0) {
+    throw "CMake build failed with exit code $LASTEXITCODE."
+}
+
+$candidates = @(
+    (Join-Path $BuildDir "n3ds-preprocess.exe"),
+    (Join-Path $BuildDir "$Configuration\n3ds-preprocess.exe"),
+    (Join-Path $BuildDir "n3ds-preprocess")
+)
+$preprocessor = $candidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+if (-not $preprocessor) {
+    $preprocessor = Get-ChildItem -LiteralPath $BuildDir -Recurse -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -eq "n3ds-preprocess.exe" -or $_.Name -eq "n3ds-preprocess" } |
+        Sort-Object LastWriteTimeUtc -Descending |
+        Select-Object -First 1 -ExpandProperty FullName
+}
+if (-not $preprocessor) {
+    throw "The build completed but n3ds-preprocess could not be located under $BuildDir."
+}
+
+$preprocessor = (Resolve-Path -LiteralPath $preprocessor).Path
+$preprocessorHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $preprocessor).Hash.ToLowerInvariant()
+
+$gitCommit = $null
+$git = Get-Command git -ErrorAction SilentlyContinue
+if ($git) {
+    $gitCommit = (& $git.Source -C $repoRoot rev-parse HEAD 2>$null)
+    if ($LASTEXITCODE -ne 0) { $gitCommit = $null }
+}
+
+$cmakeVersion = (& $cmake --version | Select-Object -First 1)
+$compiler = $null
+$cachePath = Join-Path $BuildDir "CMakeCache.txt"
+if (Test-Path -LiteralPath $cachePath) {
+    $compilerLine = Get-Content -LiteralPath $cachePath |
+        Where-Object { $_ -match '^CMAKE_C_COMPILER:(FILEPATH|STRING)=' } |
+        Select-Object -First 1
+    if ($compilerLine) {
+        $compiler = ($compilerLine -split '=', 2)[1]
+    }
+}
+
+$manifestDir = Join-Path $repoRoot "build\repro"
+New-Item -ItemType Directory -Force -Path $manifestDir | Out-Null
+$manifestPath = Join-Path $manifestDir "preprocessor-build.json"
+
+$manifest = [ordered]@{
+    repository_commit = $gitCommit
+    configuration = $Configuration
+    generator = $Generator
+    cmake = $cmake
+    cmake_version = $cmakeVersion
+    c_compiler = $compiler
+    executable = $preprocessor
+    executable_sha256 = $preprocessorHash
+    generated_utc = [DateTime]::UtcNow.ToString("o")
+}
+$manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
+
+Write-Host ""
+Write-Host "n3ds-preprocess build completed." -ForegroundColor Green
+Write-Host "Executable: $preprocessor"
+Write-Host "SHA-256:   $preprocessorHash"
+Write-Host "Manifest:  $manifestPath"
+)) {
         $Generator = "MinGW Makefiles"
     }
+}
+
+if (-not $Generator) {
+    throw "A supported host build generator was not found. Install Ninja or pass -Generator and -MakeProgram explicitly."
 }
 
 New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
