@@ -4917,6 +4917,107 @@ static void N3DSRenderer_drawLineColor(Renderer* base, float x1, float y1, float
     N3DSRenderer_noteC2DDraws(renderer, 1u);
 }
 
+// Narrow diagnostic: record distinct actual glyph bounds rather than every
+// writer character on every frame. Keep SD writes away from the hot path.
+static void N3DSRenderer_traceJapaneseGlyphBounds(
+    N3DSRenderer* renderer, Renderer* base, Font* font,
+    const char* text, float x, float y, float argScaleX, float argScaleY,
+    float effectiveXScale, float effectiveYScale, float angleDeg
+) {
+    if (renderer->activeSceneTarget != N3DS_SCENE_TARGET_TOP ||
+        text == NULL || font->name == NULL ||
+        strncmp(font->name, "fnt_ja_", 7) != 0 ||
+        strlen(text) != 3u) return;
+
+    int32_t pos = 0;
+    uint16_t ch = TextUtils_decodeUtf8(text, 3, &pos);
+    if (pos != 3 || ch < 0x3040u || ch > 0x30FFu) return;
+
+    FontGlyph* glyph = TextUtils_findGlyph(font, ch);
+    if (glyph == NULL || glyph->sourceHeight == 0u) return;
+
+    float cursorY = 0.0f;
+    float stride = TextUtils_lineStride(font);
+    if (base->drawValign == 1) cursorY -= stride * 0.5f;
+    else if (base->drawValign == 2) cursorY -= stride;
+    cursorY -= (float) font->ascenderOffset;
+
+    float lineX = x;
+    float lineWidth = TextUtils_measureLineWidth(font, text, 3);
+    if (base->drawHalign == 1) lineX -= lineWidth * effectiveXScale * 0.5f;
+    else if (base->drawHalign == 2) lineX -= lineWidth * effectiveXScale;
+
+    float localX = lineX + (float) glyph->offset * effectiveXScale;
+    float localY = y + cursorY * effectiveYScale;
+    float localBottom = localY + (float) glyph->sourceHeight * effectiveYScale;
+    float screenX = N3DSRenderer_transformScreenX(renderer, localX);
+    float screenTop = N3DSRenderer_transformScreenY(renderer, localY);
+    float screenBottom = N3DSRenderer_transformScreenY(renderer, localBottom);
+    float screenHeight = screenBottom - screenTop;
+
+    const bool isNe = ch == 0x306Du;  // ね
+    if (!isNe && screenHeight < 22.0f && screenBottom < 218.0f) return;
+
+    typedef struct {
+        uint16_t codepoint;
+        int32_t fontIndex;
+        int32_t xBucket;
+        int32_t yBucket;
+        int32_t heightBucket;
+        int32_t scaleBucket;
+        int32_t viewBucket;
+    } BoundsSample;
+    static BoundsSample seenNe[24] = {0};
+    static BoundsSample seenOther[24] = {0};
+    static uint32_t countNe = 0u;
+    static uint32_t countOther = 0u;
+
+    BoundsSample* seen = isNe ? seenNe : seenOther;
+    uint32_t* count = isNe ? &countNe : &countOther;
+    if (*count >= 24u) return;
+
+    BoundsSample key = {0};
+    key.codepoint = ch;
+    key.fontIndex = base->drawFont;
+    key.xBucket = (int32_t) floorf(screenX / 16.0f);
+    key.yBucket = (int32_t) floorf(screenTop / 8.0f);
+    key.heightBucket = (int32_t) floorf(screenHeight / 4.0f);
+    key.scaleBucket = (int32_t) lroundf(argScaleY * 16.0f);
+    key.viewBucket = (int32_t) lroundf(renderer->viewScaleY * 16.0f);
+
+    for (uint32_t i = 0u; i < *count; ++i) {
+        if (seen[i].codepoint == key.codepoint &&
+            seen[i].fontIndex == key.fontIndex &&
+            seen[i].xBucket == key.xBucket &&
+            seen[i].yBucket == key.yBucket &&
+            seen[i].heightBucket == key.heightBucket &&
+            seen[i].scaleBucket == key.scaleBucket &&
+            seen[i].viewBucket == key.viewBucket) return;
+    }
+    // Count before opening the SD file, so even write failures cannot
+    // cause repeated fopen calls on each frame.
+    seen[(*count)++] = key;
+
+    FILE* file = fopen("sdmc:/3ds/cinnamon/glyph_bounds_probe.log", "a");
+    if (file == NULL) return;
+    fprintf(
+        file,
+        "char=U+%04X font=%ld:%s spriteFont=%d xy=%.2f,%.2f arg=%.3f,%.3f fontScale=%.3f,%.3f eff=%.3f,%.3f view=%.3f,%.3f glyph=%ux%u off=%d asc=%d stride=%.2f align=%ld,%ld angle=%.2f localTop=%.2f screenX=%.2f screenTop=%.2f screenBottom=%.2f screenHeight=%.2f over240=%d\n",
+        (unsigned int) ch, (long) base->drawFont, font->name, font->isSpriteFont ? 1 : 0,
+        (double) x, (double) y, (double) argScaleX, (double) argScaleY,
+        (double) font->scaleX, (double) font->scaleY,
+        (double) effectiveXScale, (double) effectiveYScale,
+        (double) renderer->viewScaleX, (double) renderer->viewScaleY,
+        (unsigned int) glyph->sourceWidth, (unsigned int) glyph->sourceHeight,
+        (int) glyph->offset, (int) font->ascenderOffset, (double) stride,
+        (long) base->drawHalign, (long) base->drawValign, (double) angleDeg,
+        (double) localY, (double) screenX, (double) screenTop,
+        (double) screenBottom, (double) screenHeight,
+        screenBottom > (float) N3DS_TOP_HEIGHT ? 1 : 0
+    );
+    fclose(file);
+}
+
 static void N3DSRenderer_drawTextCommon(Renderer* base, const char* text, float x, float y, float xscale, float yscale, float angleDeg, bool gradient, int32_t c1, int32_t c2, int32_t c3, int32_t c4, float alpha) {
     DataWin* dw = base->dataWin;
     if (base->drawFont < 0 || (uint32_t) base->drawFont >= dw->font.count) return;
@@ -4957,6 +5058,11 @@ static void N3DSRenderer_drawTextCommon(Renderer* base, const char* text, float 
         effectiveYScale *= readabilityScaleY;
         renderer->textLinearFilterActive = true;
     }
+
+    N3DSRenderer_traceJapaneseGlyphBounds(
+        renderer, base, font, text, x, y, xscale, yscale,
+        effectiveXScale, effectiveYScale, angleDeg
+    );
 
     N3DSRenderer_traceBattleText(
         renderer,
