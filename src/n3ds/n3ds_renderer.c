@@ -4706,13 +4706,23 @@ static void N3DSRenderer_drawLineColor(Renderer* base, float x1, float y1, float
     N3DSRenderer_noteC2DDraws(renderer, 1u);
 }
 
+static bool N3DSRenderer_textContainsNonAscii(const char* text) {
+    if (text == NULL) return false;
+    for (const unsigned char* p = (const unsigned char*) text; *p != '\0'; ++p) {
+        if (*p >= 0x80u) return true;
+    }
+    return false;
+}
+
 static void N3DSRenderer_drawTextCommon(Renderer* base, const char* text, float x, float y, float xscale, float yscale, float angleDeg, bool gradient, int32_t c1, int32_t c2, int32_t c3, int32_t c4, float alpha) {
     DataWin* dw = base->dataWin;
     if (base->drawFont < 0 || (uint32_t) base->drawFont >= dw->font.count) return;
 
     N3DSRenderer* renderer = (N3DSRenderer*) base;
     bool savedTextLinearFilterActive = renderer->textLinearFilterActive;
-    renderer->textLinearFilterActive = renderer->topScreenGui2xActive;
+    renderer->textLinearFilterActive =
+        renderer->topScreenGui2xActive &&
+        !N3DSRenderer_textContainsNonAscii(text);
     u64 textStartTick = svcGetSystemTick();
     Font* font = &dw->font.fonts[base->drawFont];
     float effectiveXScale = xscale * font->scaleX;
