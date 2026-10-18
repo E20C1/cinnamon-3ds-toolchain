@@ -139,8 +139,8 @@ function Get-DevkitProRequiredPaths {
         "C:\devkitPro\devkitARM\bin\arm-none-eabi-gcc.exe",
         "C:\devkitPro\libctru",
         "C:\devkitPro\cmake\3DS.cmake",
-        "C:\devkitPro\portlibs\3ds\lib\libcitro2d.a",
-        "C:\devkitPro\portlibs\3ds\lib\libcitro3d.a"
+        "C:\devkitPro\libctru\lib\libcitro2d.a",
+        "C:\devkitPro\libctru\lib\libcitro3d.a"
     )
 }
 
@@ -247,8 +247,8 @@ function Write-EnvironmentSummary {
         "devkitARM" = (Test-Path -LiteralPath "C:\devkitPro\devkitARM\bin\arm-none-eabi-gcc.exe")
         "libctru" = (Test-Path -LiteralPath "C:\devkitPro\libctru")
         "3DS.cmake" = (Test-Path -LiteralPath "C:\devkitPro\cmake\3DS.cmake")
-        "citro2d" = (Test-Path -LiteralPath "C:\devkitPro\portlibs\3ds\lib\libcitro2d.a")
-        "citro3d" = (Test-Path -LiteralPath "C:\devkitPro\portlibs\3ds\lib\libcitro3d.a")
+        "citro2d" = (Test-Path -LiteralPath "C:\devkitPro\libctru\lib\libcitro2d.a")
+        "citro3d" = (Test-Path -LiteralPath "C:\devkitPro\libctru\lib\libcitro3d.a")
     }
 
     foreach ($entry in $checks.GetEnumerator()) {
