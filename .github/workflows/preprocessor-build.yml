@@ -8,6 +8,8 @@ on:
       - "src/data_win.c"
       - "src/gl/image_decoder.c"
       - "vendor/**"
+      - "scripts/build-preprocessor.ps1"
+      - "scripts/preprocess-game.ps1"
       - ".github/workflows/preprocessor-build.yml"
   pull_request:
     paths:
@@ -16,6 +18,8 @@ on:
       - "src/data_win.c"
       - "src/gl/image_decoder.c"
       - "vendor/**"
+      - "scripts/build-preprocessor.ps1"
+      - "scripts/preprocess-game.ps1"
       - ".github/workflows/preprocessor-build.yml"
 
 jobs:
@@ -29,3 +33,30 @@ jobs:
         run: cmake --build build/ci-preprocessor --config Release
       - name: Record SHA-256
         run: sha256sum build/ci-preprocessor/n3ds-preprocess
+
+  windows-host-script:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse PowerShell wrappers
+        shell: pwsh
+        run: |
+          $failed = $false
+          foreach ($path in @("scripts/build-preprocessor.ps1", "scripts/preprocess-game.ps1")) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $path),
+              [ref]$tokens,
+              [ref]$errors
+            ) | Out-Null
+            if ($errors.Count -gt 0) {
+              $failed = $true
+              Write-Host "Parser errors in $path"
+              $errors | ForEach-Object { Write-Host $_.Message }
+            }
+          }
+          if ($failed) { exit 1 }
+      - name: Build preprocessor through repository wrapper
+        shell: pwsh
+        run: .\scripts\build-preprocessor.ps1
