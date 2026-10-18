@@ -43,6 +43,18 @@ static void N3DS_setAsrielRainbowInfoLed(Runner* runner);
 
 static RValue builtinN3DSRenderTopScreen(VMContext* ctx, RValue* args, int32_t argCount);
 static bool battleDraw_is3DSBattleActive(VMContext* ctx, Runner* runner);
+// Forward declaration for the 3DS battle glyph sprite diagnostic.
+// Its implementation may appear later in this translation unit.
+static void builtin_trace3DSBattleGlyphSprite(
+    VMContext* ctx,
+    const char* kind,
+    int32_t spriteIndex,
+    int32_t subimg,
+    float x,
+    float y,
+    float xscale,
+    float yscale
+);
 
 #ifdef __3DS__
 static Result g_n3dsAsrielLedInitRc = 0;
