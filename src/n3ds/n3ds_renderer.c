@@ -4924,6 +4924,9 @@ static void N3DSRenderer_traceJapaneseGlyphBounds(
     const char* text, float x, float y, float argScaleX, float argScaleY,
     float effectiveXScale, float effectiveYScale, float angleDeg
 ) {
+    // Hardware diagnosis complete (v4): fnt_ja_plainbig is the oversized path.
+    // Keep this probe dormant during normal play to avoid diagnostic overhead.
+    return;
     if (renderer->activeSceneTarget != N3DS_SCENE_TARGET_TOP ||
         text == NULL || strlen(text) != 3u) return;
 
@@ -5043,6 +5046,7 @@ static void N3DSRenderer_drawTextCommon(Renderer* base, const char* text, float 
     bool useReadableJapaneseBattleText =
         font->name != NULL &&
         strncmp(font->name, "fnt_ja_", 7) == 0 &&
+        strcmp(font->name, "fnt_ja_plainbig") != 0 &&
         renderer->activeSceneTarget == N3DS_SCENE_TARGET_TOP &&
         fabsf(renderer->viewScaleX - 0.5f) < 0.01f &&
         fabsf(renderer->viewScaleY - 0.5f) < 0.01f &&
