@@ -11,6 +11,9 @@ on:
       - "scripts/build-preprocessor.ps1"
       - "scripts/preprocess-game.ps1"
       - "scripts/setup-windows.ps1"
+      - "scripts/build-n3ds.ps1"
+      - "build-windows-n3ds.ps1"
+      - "build-new3ds.cmd"
       - "setup-windows.cmd"
       - ".github/workflows/preprocessor-build.yml"
   pull_request:
@@ -23,6 +26,9 @@ on:
       - "scripts/build-preprocessor.ps1"
       - "scripts/preprocess-game.ps1"
       - "scripts/setup-windows.ps1"
+      - "scripts/build-n3ds.ps1"
+      - "build-windows-n3ds.ps1"
+      - "build-new3ds.cmd"
       - "setup-windows.cmd"
       - ".github/workflows/preprocessor-build.yml"
 
@@ -46,7 +52,7 @@ jobs:
         shell: pwsh
         run: |
           $failed = $false
-          foreach ($path in @("scripts/build-preprocessor.ps1", "scripts/preprocess-game.ps1", "scripts/setup-windows.ps1")) {
+          foreach ($path in @("scripts/build-preprocessor.ps1", "scripts/preprocess-game.ps1", "scripts/setup-windows.ps1", "scripts/build-n3ds.ps1", "build-windows-n3ds.ps1")) {
             $tokens = $null
             $errors = $null
             [System.Management.Automation.Language.Parser]::ParseFile(
