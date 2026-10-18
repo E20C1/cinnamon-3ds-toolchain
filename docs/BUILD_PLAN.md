@@ -4,13 +4,15 @@ The work is intentionally staged so failures can be attributed to one layer at a
 
 ## Milestone 1: reproduce the inherited preprocessor
 
-Build `tools/n3ds-preprocess` from source and compare its behavior with the known historical Linux binary where practical.
+Status: **local acceptance reached**. The Windows bootstrap, source-built host preprocessor, local `data.win` conversion, required output validation, and reproducibility manifests have all completed successfully on the reference development machine.
 
 Acceptance: a user-owned UNDERTALE `data.win` can be converted without corruption into the asset layout expected by the 3DS runtime.
 
 ## Milestone 2: reproduce the inherited 3DSX build
 
-Build Cinnamon with `PLATFORM=n3ds` using the generated assets either from `resources/3ds/romfs` or `sdmc:/3ds/cinnamon`.
+Status: **in progress**. The Windows build wrapper now validates the generated asset tree, passes it as a configurable RomFS root, builds with the devkitPro 3DS CMake toolchain, and records a local 3DS build manifest.
+
+Build Cinnamon with `PLATFORM=n3ds` using the generated assets either embedded in RomFS or loaded from `sdmc:/3ds/cinnamon`.
 
 Acceptance: the resulting `cinnamon.3dsx` launches and reaches playable UNDERTALE behavior on New Nintendo 3DS hardware.
 
