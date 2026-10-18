@@ -1,0 +1,31 @@
+name: preprocessor-build
+
+on:
+  push:
+    paths:
+      - "tools/n3ds-preprocess/**"
+      - "src/binary_reader.c"
+      - "src/data_win.c"
+      - "src/gl/image_decoder.c"
+      - "vendor/**"
+      - ".github/workflows/preprocessor-build.yml"
+  pull_request:
+    paths:
+      - "tools/n3ds-preprocess/**"
+      - "src/binary_reader.c"
+      - "src/data_win.c"
+      - "src/gl/image_decoder.c"
+      - "vendor/**"
+      - ".github/workflows/preprocessor-build.yml"
+
+jobs:
+  linux-host-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S tools/n3ds-preprocess -B build/ci-preprocessor -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build/ci-preprocessor --config Release
+      - name: Record SHA-256
+        run: sha256sum build/ci-preprocessor/n3ds-preprocess
