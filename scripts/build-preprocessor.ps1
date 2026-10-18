@@ -68,6 +68,7 @@ $compiler = Resolve-Executable `
     -ExplicitPath $HostCompiler `
     -CommandNames @("gcc.exe", "gcc", "clang.exe", "clang") `
     -FallbackPaths @(
+        "C:\msys64\ucrt64\bin\gcc.exe",
         "C:\devkitPro\msys2\ucrt64\bin\gcc.exe",
         "C:\devkitPro\msys2\mingw64\bin\gcc.exe",
         "C:\devkitPro\msys2\clang64\bin\clang.exe"
@@ -77,10 +78,11 @@ if (-not $compiler) {
     throw @"
 A Windows host C compiler was not found.
 
-For the devkitPro/MSYS2 environment used by this project, install the UCRT64
-host toolchain with:
+devkitPro's bundled MSYS2 does not necessarily expose the full upstream
+MSYS2 UCRT64 package repositories. Install a standard MSYS2 instance
+(default: C:\msys64), then install the UCRT64 host toolchain there:
 
-  & "C:\devkitPro\msys2\usr\bin\pacman.exe" -S --needed mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-ninja
+  & "C:\msys64\usr\bin\pacman.exe" -S --needed mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-ninja
 
 Then rerun this script. You may also pass -HostCompiler <path>.
 "@
@@ -90,6 +92,8 @@ $makeTool = Resolve-Executable `
     -ExplicitPath $MakeProgram `
     -CommandNames @("ninja.exe", "ninja", "mingw32-make.exe", "mingw32-make") `
     -FallbackPaths @(
+        "C:\msys64\ucrt64\bin\ninja.exe",
+        "C:\msys64\ucrt64\bin\mingw32-make.exe",
         "C:\devkitPro\msys2\ucrt64\bin\ninja.exe",
         "C:\devkitPro\msys2\mingw64\bin\ninja.exe",
         "C:\devkitPro\msys2\ucrt64\bin\mingw32-make.exe",
