@@ -2451,7 +2451,22 @@ static bool emitDirectFontAsset(
 
     char relativePath[256];
     snprintf(relativePath, sizeof(relativePath), "gfx/fonts/font_%05lu", (unsigned long) fontIndex);
-    bool ok = writeDirectTextureAsset(options, relativePath, pixels, item->sourceWidth, item->sourceHeight, N3DS_TEXFMT_RGBA5551);
+
+    // Monochrome GameMaker font atlases only need luminance + alpha. LA4 keeps
+    // four alpha bits instead of RGBA5551's single alpha bit, which preserves
+    // thin antialiased Japanese strokes when the 3DS renderer minifies them.
+    N3DSTextureFormat fontFormat =
+        pixelsLookMonochrome(pixels, item->sourceWidth, item->sourceHeight)
+            ? N3DS_TEXFMT_LA4
+            : N3DS_TEXFMT_RGBA5551;
+    bool ok = writeDirectTextureAsset(
+        options,
+        relativePath,
+        pixels,
+        item->sourceWidth,
+        item->sourceHeight,
+        fontFormat
+    );
     free(pixels);
     return ok;
 }
