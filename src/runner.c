@@ -531,6 +531,85 @@ static bool Runner_is3DSUndyneBattle(Runner* runner) {
     return false;
 }
 
+bool Runner_get3DSBattleTouchTarget(
+    Runner* runner,
+    const char* targetToken,
+    float touchX,
+    float touchY,
+    float* outCurrentX,
+    float* outCurrentY,
+    float* outTargetX,
+    float* outTargetY
+) {
+    if (runner == NULL || runner->dataWin == NULL || targetToken == NULL || targetToken[0] == '\0') return false;
+    if (outCurrentX == NULL || outCurrentY == NULL || outTargetX == NULL || outTargetY == NULL) return false;
+
+    Runner_prepare3DSDrawBattleState(runner);
+    if (!runner->n3dsDrawBattleActive || !runner->n3dsDrawDodgingBullets) {
+        runner->n3dsDrawBattleStateValid = false;
+        return false;
+    }
+
+    bool isAsrielBattle = Runner_is3DSAsrielBattle(runner);
+    bool isUndyneBattle = Runner_is3DSUndyneBattle(runner);
+    int32_t guiW = runner->guiWidth > 0 ? runner->guiWidth : (int32_t) runner->dataWin->gen8.defaultWindowWidth;
+    int32_t guiH = runner->guiHeight > 0 ? runner->guiHeight : (int32_t) runner->dataWin->gen8.defaultWindowHeight;
+    if (guiW <= 0) guiW = 640;
+    if (guiH <= 0) guiH = 480;
+
+    float sx = 320.0f / (float) guiW;
+    float sy = 240.0f / (float) guiH;
+    float frameScale = sx < sy ? sx : sy;
+    float frameOffsetX = (320.0f - (float) guiW * frameScale) * 0.5f;
+    float frameOffsetY = (240.0f - (float) guiH * frameScale) * 0.5f;
+    float battleScale = (isUndyneBattle || isAsrielBattle) ? 1.0f : k3DSBottomBattleFieldScale;
+    float battleYOffset = isAsrielBattle ? 0.0f : k3DSBottomBattleFieldYOffset;
+    float viewScaleX = frameScale * battleScale;
+    float viewScaleY = frameScale * battleScale;
+    float portOffsetX = ((float) guiW * (frameScale - viewScaleX) * 0.5f);
+    float portOffsetY = ((float) guiH * (frameScale - viewScaleY) * 0.5f) + battleYOffset;
+    if (viewScaleX <= 0.0f || viewScaleY <= 0.0f) {
+        runner->n3dsDrawBattleStateValid = false;
+        return false;
+    }
+
+    float targetX = (touchX - frameOffsetX - portOffsetX) / viewScaleX;
+    float targetY = (touchY - frameOffsetY - portOffsetY) / viewScaleY;
+
+    Instance* best = NULL;
+    float bestDistanceSquared = INFINITY;
+    int32_t instanceCount = (int32_t) arrlen(runner->instances);
+    repeat(instanceCount, i) {
+        Instance* inst = runner->instances[i];
+        if (inst == NULL || inst->destroyed || !inst->active || !inst->visible) continue;
+        if (!Runner_is3DSInstanceInsideBattleField(runner, inst)) continue;
+
+        bool matches = Runner_objectContains3DSTokenInHierarchy(runner, inst->objectIndex, targetToken);
+        if (!matches && inst->spriteIndex >= 0 && (uint32_t) inst->spriteIndex < runner->dataWin->sprt.count) {
+            const char* spriteName = runner->dataWin->sprt.sprites[inst->spriteIndex].name;
+            matches = Runner_stringContainsToken(spriteName, targetToken);
+        }
+        if (!matches) continue;
+
+        float dx = inst->x - targetX;
+        float dy = inst->y - targetY;
+        float distanceSquared = dx * dx + dy * dy;
+        if (best == NULL || distanceSquared < bestDistanceSquared) {
+            best = inst;
+            bestDistanceSquared = distanceSquared;
+        }
+    }
+
+    runner->n3dsDrawBattleStateValid = false;
+    if (best == NULL) return false;
+
+    *outCurrentX = best->x;
+    *outCurrentY = best->y;
+    *outTargetX = targetX;
+    *outTargetY = targetY;
+    return true;
+}
+
 static void Runner_prepare3DSBattleReplayLists(Runner* runner, Drawable* drawables, int32_t drawableCount) {
     if (runner == NULL || runner->n3dsBattleReplayListsValid) return;
 
