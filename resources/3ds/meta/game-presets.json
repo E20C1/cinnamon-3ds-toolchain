@@ -27,7 +27,9 @@
         "battle_follow_target_object_index": 743,
         "battle_follow_active_self_var": "movement",
         "battle_follow_active_greater_than": 0,
-        "battle_follow_tolerance": 4
+        "battle_follow_tolerance": 4,
+        "battle_follow_activation_ms": 50,
+        "battle_follow_step_hint": 4
       }
     }
   ]
