@@ -195,6 +195,10 @@ struct N3DSAudioSystem {
     AudioSystem base;
     FileSystem* fileSystem;
     bool initialized;
+    bool ndspReady;
+    uint8_t* embeddedDspComponent;
+    uint32_t embeddedDspComponentSize;
+    char startupError[192];
     float masterGain;
     N3DSStreamEntry streams[N3DS_MAX_STREAMS];
     N3DSSoundInstance instances[N3DS_MAX_SOUND_INSTANCES];
@@ -334,6 +338,29 @@ static bool N3DSAudio_readFileFully(const char* path, uint8_t** outData, uint32_
     fclose(file);
     *outData = data;
     *outSize = (uint32_t) size;
+    return true;
+}
+
+
+static bool N3DSAudio_tryUseEmbeddedDspComponent(N3DSAudioSystem* audio) {
+    if (audio == NULL) return false;
+
+    uint8_t* component = NULL;
+    uint32_t componentSize = 0;
+    if (!N3DSAudio_readFileFully("romfs:/dspfirm.cdc", &component, &componentSize)) {
+        return false;
+    }
+
+    // Luma's DSP firmware dumper rejects components above 0x10000 bytes.
+    // Keep the same upper bound and reject obviously truncated files.
+    if (componentSize < 0x100u || componentSize > 0x10000u) {
+        free(component);
+        return false;
+    }
+
+    ndspUseComponent(component, componentSize, 0xFFu, 0xFFu);
+    audio->embeddedDspComponent = component;
+    audio->embeddedDspComponentSize = componentSize;
     return true;
 }
 
@@ -2814,7 +2841,22 @@ static void N3DSAudio_init(AudioSystem* base, DataWin* dataWin, FileSystem* file
     audio->backgroundPrewarmByteBudget = audio->isNew3DS ? N3DS_BACKGROUND_PREWARM_BYTE_BUDGET_NEW3DS : N3DS_BACKGROUND_PREWARM_BYTE_BUDGET_OLD3DS;
     N3DSAudio_loadPackedSoundBank(audio);
 
-    ndspInit();
+    // Installed CIAs do not receive Homebrew Launcher's hb:ndsp handle.
+    // Prefer a user-supplied DSP component embedded in the CIA RomFS; when it
+    // is absent libctru may still fall back to /3ds/dspfirm.cdc on the SD card.
+    N3DSAudio_tryUseEmbeddedDspComponent(audio);
+    Result ndspResult = ndspInit();
+    if (R_FAILED(ndspResult)) {
+        snprintf(
+            audio->startupError,
+            sizeof(audio->startupError),
+            "DSP audio init failed (0x%08lX). Embed your own dspfirm.cdc when building the CIA, or dump it to /3ds/dspfirm.cdc with Luma3DS.",
+            (unsigned long) ndspResult
+        );
+        N3DSDebugLog_event("audio_fail", "ndspInit failed rc=0x%08lX", (unsigned long) ndspResult);
+        return;
+    }
+    audio->ndspReady = true;
     ndspSetOutputMode(NDSP_OUTPUT_STEREO);
     N3DSDebugLog_event(
         "audio",
@@ -2895,7 +2937,13 @@ static void N3DSAudio_destroy(AudioSystem* base) {
     free(audio->cachedSounds);
     free(audio->packedSoundBankEntries);
     free(audio->packedSoundBankData);
-    ndspExit();
+    if (audio->ndspReady) {
+        ndspExit();
+        audio->ndspReady = false;
+    }
+    free(audio->embeddedDspComponent);
+    audio->embeddedDspComponent = NULL;
+    audio->embeddedDspComponentSize = 0;
     free(audio->base.audioGroups);
     free(audio);
 
@@ -3792,6 +3840,18 @@ static AudioSystemVtable N3DSAudio_vtable = {
     .destroyStream = N3DSAudio_destroyStream,
     .prewarmRoom = N3DSAudio_prewarmRoom,
 };
+
+
+bool N3DSAudioSystem_isReady(AudioSystem* base) {
+    N3DSAudioSystem* audio = (N3DSAudioSystem*) base;
+    return audio != NULL && audio->ndspReady && audio->initialized;
+}
+
+const char* N3DSAudioSystem_getStartupError(AudioSystem* base) {
+    N3DSAudioSystem* audio = (N3DSAudioSystem*) base;
+    if (audio == NULL || audio->startupError[0] == '\0') return NULL;
+    return audio->startupError;
+}
 
 N3DSAudioSystem* N3DSAudioSystem_create(void) {
     N3DSAudioSystem* audio = safeCalloc(1, sizeof(N3DSAudioSystem));
