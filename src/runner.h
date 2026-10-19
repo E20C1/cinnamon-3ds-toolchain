@@ -549,11 +549,23 @@ void Runner_drawTileLayer(Runner* runner, uint32_t layerIndex, RoomLayerTilesDat
 void Runner_freeRuntimeLayer(RuntimeLayer* runtimeLayer);
 RunnerTelemetry Runner_collectTelemetry(Runner* runner);
 #ifdef __3DS__
-bool Runner_get3DSBattleTouchTarget(
+typedef enum {
+    N3DS_BATTLE_TOUCH_NOT_ACTIVE = 0,
+    N3DS_BATTLE_TOUCH_TARGET_NOT_FOUND = 1,
+    N3DS_BATTLE_TOUCH_TARGET_IDLE = 2,
+    N3DS_BATTLE_TOUCH_READY = 3,
+    N3DS_BATTLE_TOUCH_LAYOUT_ERROR = 4
+} N3DSBattleTouchStatus;
+
+N3DSBattleTouchStatus Runner_get3DSBattleTouchTarget(
     Runner* runner,
     const char* targetToken,
+    int32_t targetObjectIndex,
+    const char* activeSelfVar,
+    float activeGreaterThan,
     float touchX,
     float touchY,
+    float* outActivity,
     float* outCurrentX,
     float* outCurrentY,
     float* outTargetX,
