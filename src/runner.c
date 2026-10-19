@@ -9,6 +9,8 @@
 
 #include <stdint.h>
 #include <stdio.h>
+#include <ctype.h>
+#include <float.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -111,6 +113,20 @@ static bool Runner_stringContainsToken(const char* haystack, const char* needle)
     return haystack != NULL && needle != NULL && strstr(haystack, needle) != NULL;
 }
 
+static bool Runner_stringContainsTokenIgnoreCase(const char* haystack, const char* needle) {
+    if (haystack == NULL || needle == NULL || needle[0] == '\0') return false;
+    size_t needleLen = strlen(needle);
+    for (const char* start = haystack; *start != '\0'; ++start) {
+        size_t i = 0;
+        while (i < needleLen && start[i] != '\0' &&
+            tolower((unsigned char) start[i]) == tolower((unsigned char) needle[i])) {
+            i++;
+        }
+        if (i == needleLen) return true;
+    }
+    return false;
+}
+
 static bool Runner_is3DSValidObjectIndex(Runner* runner, int32_t objectIndex);
 static bool Runner_objectMatches3DSNameInHierarchy(Runner* runner, int32_t objectIndex, const char* name);
 static bool Runner_objectContains3DSTokenInHierarchy(Runner* runner, int32_t objectIndex, const char* needle);
@@ -138,6 +154,13 @@ static RValue Runner_get3DSGlobal(Runner* runner, const char* name) {
 
 static double Runner_get3DSGlobalReal(Runner* runner, const char* name) {
     return (double) RValue_toReal(Runner_get3DSGlobal(runner, name));
+}
+
+double Runner_get3DSGlobalRealByName(Runner* runner, const char* name, double fallback) {
+    if (runner == NULL || name == NULL || name[0] == '\0') return fallback;
+    RValue value = Runner_get3DSGlobal(runner, name);
+    if (value.type == RVALUE_UNDEFINED) return fallback;
+    return (double) RValue_toReal(value);
 }
 
 static double Runner_get3DSGlobalArrayReal(Runner* runner, const char* name, int32_t index) {
@@ -258,6 +281,44 @@ static bool Runner_objectContains3DSTokenInHierarchy(Runner* runner, int32_t obj
     return false;
 }
 
+static bool Runner_objectContains3DSTokenIgnoreCaseInHierarchy(Runner* runner, int32_t objectIndex, const char* token) {
+    int32_t depth = 0;
+    while (Runner_is3DSValidObjectIndex(runner, objectIndex) && depth < 64) {
+        const char* objectName = Runner_get3DSObjectName(runner, objectIndex);
+        if (Runner_stringContainsTokenIgnoreCase(objectName, token)) return true;
+        objectIndex = runner->dataWin->objt.objects[objectIndex].parentId;
+        depth++;
+    }
+    return false;
+}
+
+Instance* Runner_find3DSActiveInstanceByTokenNear(Runner* runner, const char* token, float targetX, float targetY) {
+    if (runner == NULL || runner->dataWin == NULL || token == NULL || token[0] == '\0') return NULL;
+
+    Instance* best = NULL;
+    float bestDistanceSquared = FLT_MAX;
+    int32_t count = (int32_t) arrlen(runner->instances);
+    repeat(count, i) {
+        Instance* inst = runner->instances[i];
+        if (inst == NULL || inst->destroyed || !inst->active || !inst->visible) continue;
+
+        bool matches = Runner_objectContains3DSTokenIgnoreCaseInHierarchy(runner, inst->objectIndex, token);
+        if (!matches && inst->spriteIndex >= 0 && (uint32_t) inst->spriteIndex < runner->dataWin->sprt.count) {
+            matches = Runner_stringContainsTokenIgnoreCase(runner->dataWin->sprt.sprites[inst->spriteIndex].name, token);
+        }
+        if (!matches) continue;
+
+        float dx = inst->x - targetX;
+        float dy = inst->y - targetY;
+        float distanceSquared = dx * dx + dy * dy;
+        if (best == NULL || distanceSquared < bestDistanceSquared) {
+            best = inst;
+            bestDistanceSquared = distanceSquared;
+        }
+    }
+    return best;
+}
+
 static bool Runner_is3DSInstanceInsideBattleField(Runner* runner, Instance* inst) {
     if (runner == NULL || inst == NULL) return false;
 
@@ -362,6 +423,7 @@ static bool Runner_is3DSBattleBackdropInstance(Runner* runner, Instance* inst) {
 
 static bool Runner_shouldOffset3DSTopBattleInstance(Runner* runner, Instance* inst) {
     if (runner == NULL || inst == NULL) return false;
+    if (runner->n3dsMirrorPass) return false;
     Runner_prepare3DSDrawBattleState(runner);
     if (!runner->n3dsDrawBattleActive) return false;
     if (Runner_is3DSAsrielBattle(runner)) return false;
@@ -697,6 +759,7 @@ static void Runner_draw3DSBottomBattleUI(Runner* runner, Drawable* drawables, in
 
 static bool Runner_shouldHideOn3DSTopScreen(Runner* runner, Instance* inst) {
     if (runner == NULL || runner->renderer == NULL || inst == NULL) return false;
+    if (runner->n3dsMirrorPass) return false;
     if (Runner_is3DSAsrielBattle(runner)) return false;
     return Runner_is3DSBattleUIObject(runner, inst);
 }
@@ -1169,7 +1232,8 @@ static void fireDrawSubtype(Runner* runner, Drawable* drawables, int32_t drawabl
     if (slot == -1) return;
 
 #ifdef __3DS__
-    if ((subtype == DRAW_GUI_BEGIN || subtype == DRAW_GUI || subtype == DRAW_GUI_END) && runner != NULL) {
+    if ((subtype == DRAW_GUI_BEGIN || subtype == DRAW_GUI || subtype == DRAW_GUI_END) &&
+        runner != NULL && !runner->n3dsMirrorPass) {
         Runner_prepare3DSDrawBattleState(runner);
         if (runner->n3dsDrawBattleActive) {
             int32_t guiW = runner->guiWidth > 0 ? runner->guiWidth : (int32_t) runner->dataWin->gen8.defaultWindowWidth;
@@ -2056,7 +2120,7 @@ void Runner_drawGUI(Runner* runner) {
     fireDrawSubtype(runner, drawables, drawableCount, DRAW_GUI_BEGIN);
     runner->frameDrawGuiEventMs += Runner_nowMs() - phaseStartMs;
 #ifdef __3DS__
-    if (runner->renderer != NULL) {
+    if (runner->renderer != NULL && !runner->n3dsMirrorPass) {
         Runner_prepare3DSDrawBattleState(runner);
         if (runner->n3dsDrawBattleActive) {
         double battleReplayStartMs = Runner_nowMs();
@@ -2075,7 +2139,7 @@ void Runner_drawGUI(Runner* runner) {
     fireDrawSubtype(runner, drawables, drawableCount, DRAW_GUI);
     runner->frameDrawGuiEventMs += Runner_nowMs() - phaseStartMs;
 #ifdef __3DS__
-    if (runner->renderer != NULL) {
+    if (runner->renderer != NULL && !runner->n3dsMirrorPass) {
         Runner_prepare3DSDrawBattleState(runner);
         if (runner->n3dsDrawBattleActive) {
         double battleReplayStartMs = Runner_nowMs();
@@ -2094,7 +2158,7 @@ void Runner_drawGUI(Runner* runner) {
     fireDrawSubtype(runner, drawables, drawableCount, DRAW_GUI_END);
     runner->frameDrawGuiEventMs += Runner_nowMs() - phaseStartMs;
 #ifdef __3DS__
-    if (runner->renderer != NULL) {
+    if (runner->renderer != NULL && !runner->n3dsMirrorPass) {
         Runner_prepare3DSDrawBattleState(runner);
         if (runner->n3dsDrawBattleActive) {
         double battleReplayStartMs = Runner_nowMs();
@@ -2167,7 +2231,7 @@ void Runner_drawViews(Runner* runner, int32_t gameW, int32_t gameH, float displa
 
 #ifdef __3DS__
             Runner_prepare3DSDrawBattleState(runner);
-            bool topBattleViewActive = Runner_is3DSBattleActive(runner);
+            bool topBattleViewActive = !runner->n3dsMirrorPass && Runner_is3DSBattleActive(runner);
             N3DSRenderer_setTopScreenBattleViewActive(renderer, topBattleViewActive);
 #endif
 
@@ -2214,7 +2278,7 @@ void Runner_drawViews(Runner* runner, int32_t gameW, int32_t gameH, float displa
         int32_t portH = gameH;
 #ifdef __3DS__
         Runner_prepare3DSDrawBattleState(runner);
-        bool topBattleViewActive = Runner_is3DSBattleActive(runner);
+        bool topBattleViewActive = !runner->n3dsMirrorPass && Runner_is3DSBattleActive(runner);
         N3DSRenderer_setTopScreenBattleViewActive(renderer, topBattleViewActive);
 #endif
         renderer->vtable->beginView(renderer, 0, 0, gameW, gameH, portX, portY, portW, portH, 0.0f);
