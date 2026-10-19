@@ -748,6 +748,24 @@ int main(int argc, char** argv) {
     AudioSystem* audioSystem = (AudioSystem*) N3DSAudioSystem_create();
     N3DSLoadingScreen_set(&loadingScreen, "Loading sound bank", 1, 2);
     audioSystem->vtable->init(audioSystem, dataWin, fileSystem);
+    if (!N3DSAudioSystem_isReady(audioSystem)) {
+        const char* audioError = N3DSAudioSystem_getStartupError(audioSystem);
+        N3DS_waitForStartExitScreen(
+            &loadingScreen,
+            audioError != NULL ? audioError : "Audio init failed. Press START."
+        );
+        audioSystem->vtable->destroy(audioSystem);
+        N3DSFileSystem_destroy((N3DSFileSystem*) fileSystem);
+        DataWin_free(dataWin);
+        N3DSLoadingScreen_free(&loadingScreen);
+        if (citroReady) {
+            C2D_Fini();
+            C3D_Fini();
+        }
+        romfsExit();
+        gfxExit();
+        return 1;
+    }
 
     N3DSLoadingScreen_set(&loadingScreen, "Initializing renderer", 2, 2);
     VMContext* vm = VM_create(dataWin);
