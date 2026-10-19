@@ -548,3 +548,15 @@ uint32_t Runner_getNextLayerId(Runner* runner);
 void Runner_drawTileLayer(Runner* runner, uint32_t layerIndex, RoomLayerTilesData* data, float layerOffsetX, float layerOffsetY, float alpha);
 void Runner_freeRuntimeLayer(RuntimeLayer* runtimeLayer);
 RunnerTelemetry Runner_collectTelemetry(Runner* runner);
+#ifdef __3DS__
+bool Runner_get3DSBattleTouchTarget(
+    Runner* runner,
+    const char* targetToken,
+    float touchX,
+    float touchY,
+    float* outCurrentX,
+    float* outCurrentY,
+    float* outTargetX,
+    float* outTargetY
+);
+#endif
