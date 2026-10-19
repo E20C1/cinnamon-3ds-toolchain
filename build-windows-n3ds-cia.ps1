@@ -13,6 +13,7 @@ param(
     [string]$Tex3ds = "",
     [string]$Makerom = "",
     [string]$Bannertool = "",
+    [string]$DspFirm = "",
 
     [string]$PresetId = "",
     [string]$Title = "",
@@ -45,6 +46,7 @@ try {
         Tex3ds = $Tex3ds
         Makerom = $Makerom
         Bannertool = $Bannertool
+        DspFirm = $DspFirm
         PresetId = $PresetId
         Title = $Title
         Description = $Description
