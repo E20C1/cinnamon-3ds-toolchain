@@ -15,7 +15,14 @@
       "unique_id": "0x01929",
       "icon": "resources/3ds/meta/icon.png",
       "banner_image": "resources/3ds/meta/banner.png",
-      "banner_audio": "resources/3ds/meta/audio.wav"
+      "banner_audio": "resources/3ds/meta/audio.wav",
+      "input": {
+        "touch_enabled": true,
+        "tap_key_code": 90,
+        "tap_max_ms": 180,
+        "tap_max_move_px": 10,
+        "drag_deadzone_px": 18
+      }
     }
   ]
 }
