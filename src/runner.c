@@ -544,11 +544,15 @@ bool Runner_get3DSBattleTouchTarget(
     if (runner == NULL || runner->dataWin == NULL || targetToken == NULL || targetToken[0] == '\0') return false;
     if (outCurrentX == NULL || outCurrentY == NULL || outTargetX == NULL || outTargetY == NULL) return false;
 
-    Runner_prepare3DSDrawBattleState(runner);
-    if (!runner->n3dsDrawBattleActive || !runner->n3dsDrawDodgingBullets) {
+    // UNDERTALE's playable battle soul enables movement when global.mnfight == 2.
+    // Do not gate touch-follow on turntimer: some encounters keep the soul movable
+    // while turntimer is zero or otherwise unsuitable as an input-state signal.
+    if ((int32_t) Runner_get3DSGlobalReal(runner, "mnfight") != 2) {
         runner->n3dsDrawBattleStateValid = false;
         return false;
     }
+
+    Runner_prepare3DSDrawBattleState(runner);
 
     bool isAsrielBattle = Runner_is3DSAsrielBattle(runner);
     bool isUndyneBattle = Runner_is3DSUndyneBattle(runner);
@@ -582,9 +586,12 @@ bool Runner_get3DSBattleTouchTarget(
     repeat(instanceCount, i) {
         Instance* inst = runner->instances[i];
         if (inst == NULL || inst->destroyed || !inst->active || !inst->visible) continue;
-        if (!Runner_is3DSInstanceInsideBattleField(runner, inst)) continue;
-
-        bool matches = Runner_objectContains3DSTokenInHierarchy(runner, inst->objectIndex, targetToken);
+        // Prefer an exact object/ancestor name (e.g. obj_heart).  The token/sprite
+        // fallback keeps the mechanism reusable for other GameMaker titles and soul variants.
+        bool matches = Runner_objectMatches3DSNameInHierarchy(runner, inst->objectIndex, targetToken);
+        if (!matches) {
+            matches = Runner_objectContains3DSTokenInHierarchy(runner, inst->objectIndex, targetToken);
+        }
         if (!matches && inst->spriteIndex >= 0 && (uint32_t) inst->spriteIndex < runner->dataWin->sprt.count) {
             const char* spriteName = runner->dataWin->sprt.sprites[inst->spriteIndex].name;
             matches = Runner_stringContainsToken(spriteName, targetToken);
