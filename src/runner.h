@@ -477,7 +477,6 @@ typedef struct Runner {
     bool n3dsDrawDodgingBullets;
     bool n3dsDrawAsrielBattle;
     bool n3dsDrawHasTopEnemyDialogue;
-    bool n3dsMirrorPass;
     bool n3dsBattleReplayListsValid;
     bool n3dsTopScreenGUIListValid;
     Instance** n3dsBattleFieldInstances;
@@ -549,7 +548,3 @@ uint32_t Runner_getNextLayerId(Runner* runner);
 void Runner_drawTileLayer(Runner* runner, uint32_t layerIndex, RoomLayerTilesData* data, float layerOffsetX, float layerOffsetY, float alpha);
 void Runner_freeRuntimeLayer(RuntimeLayer* runtimeLayer);
 RunnerTelemetry Runner_collectTelemetry(Runner* runner);
-#ifdef __3DS__
-double Runner_get3DSGlobalRealByName(Runner* runner, const char* name, double fallback);
-Instance* Runner_find3DSActiveInstanceByTokenNear(Runner* runner, const char* token, float targetX, float targetY);
-#endif

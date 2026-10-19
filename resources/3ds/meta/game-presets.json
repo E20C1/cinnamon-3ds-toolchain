@@ -15,22 +15,7 @@
       "unique_id": "0x01929",
       "icon": "resources/3ds/meta/icon.png",
       "banner_image": "resources/3ds/meta/banner.png",
-      "banner_audio": "resources/3ds/meta/audio.wav",
-      "touch": {
-        "enabled": true,
-        "mirror_bottom_screen": true,
-        "tap_key_code": 90,
-        "tap_max_ms": 180,
-        "tap_max_move_px": 10.0,
-        "virtual_stick_deadzone_px": 18.0,
-        "follow": {
-          "enabled": true,
-          "condition_global": "turntimer",
-          "condition_greater_than": 0.0,
-          "target_token": "heart",
-          "tolerance": 4.0
-        }
-      }
+      "banner_audio": "resources/3ds/meta/audio.wav"
     }
   ]
 }

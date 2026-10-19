@@ -6,8 +6,6 @@ Renderer* N3DSRenderer_create(void);
 bool N3DSRenderer_isReady(Renderer* renderer);
 const char* N3DSRenderer_getStartupError(Renderer* renderer);
 void N3DSRenderer_beginOverlay(Renderer* renderer);
-void N3DSRenderer_beginBottomScreenMirror(Renderer* renderer, int32_t gameW, int32_t gameH);
-void N3DSRenderer_endBottomScreenMirror(Renderer* renderer);
 void N3DSRenderer_beginBottomScreenGUIEx(Renderer* renderer, int32_t guiW, int32_t guiH, float scaleX, float scaleY, float offsetX, float offsetY);
 void N3DSRenderer_beginBottomScreenGUI(Renderer* renderer, int32_t guiW, int32_t guiH);
 void N3DSRenderer_endBottomScreenGUI(Renderer* renderer);
