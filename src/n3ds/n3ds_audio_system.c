@@ -328,7 +328,11 @@ static bool N3DSAudio_readFileFully(const char* path, uint8_t** outData, uint32_
         return false;
     }
 
-    uint8_t* data = safeMalloc((size_t) size);
+    uint8_t* data = malloc((size_t) size);
+    if (data == NULL) {
+        fclose(file);
+        return false;
+    }
     if (fread(data, 1, (size_t) size, file) != (size_t) size) {
         fclose(file);
         free(data);
@@ -469,8 +473,24 @@ static bool N3DSAudio_loadPackedSoundBank(N3DSAudioSystem* audio) {
     N3DSPackedSoundBankEntry* entries = NULL;
     bool loaded = false;
 
-    if (!N3DSAudio_readFileFully(path, &bankData, &bankSize)) goto cleanup;
-    if (bankSize < 16u) goto cleanup;
+    struct stat bankStat;
+    unsigned long expectedBankKB = 0ul;
+    if (stat(path, &bankStat) == 0 && bankStat.st_size > 0) {
+        expectedBankKB = (unsigned long) (((uint64_t) bankStat.st_size + 1023u) / 1024u);
+    }
+    if (!N3DSAudio_readFileFully(path, &bankData, &bankSize)) {
+        snprintf(
+            audio->startupError,
+            sizeof(audio->startupError),
+            "Sound bank read/allocation failed (%lu KB). Press START.",
+            expectedBankKB
+        );
+        goto cleanup;
+    }
+    if (bankSize < 16u) {
+        snprintf(audio->startupError, sizeof(audio->startupError), "Sound bank is truncated. Press START.");
+        goto cleanup;
+    }
     if (N3DSAudio_readU32(bankData + 0u) != N3DS_SOUND_BANK_MAGIC) goto cleanup;
     uint32_t version = N3DSAudio_readU32(bankData + 4u);
     if (version != N3DS_SOUND_BANK_VERSION_BCWAV && version != N3DS_SOUND_BANK_VERSION_PCM16) goto cleanup;
@@ -483,7 +503,16 @@ static bool N3DSAudio_loadPackedSoundBank(N3DSAudioSystem* audio) {
     if (dataOffset < 16u || dataOffset > bankSize) goto cleanup;
     if (16u + tableBytes > dataOffset) goto cleanup;
 
-    entries = safeCalloc(entryCount, sizeof(N3DSPackedSoundBankEntry));
+    entries = calloc(entryCount > 0u ? entryCount : 1u, sizeof(N3DSPackedSoundBankEntry));
+    if (entries == NULL) {
+        snprintf(
+            audio->startupError,
+            sizeof(audio->startupError),
+            "Sound bank metadata allocation failed (%lu entries). Press START.",
+            (unsigned long) entryCount
+        );
+        goto cleanup;
+    }
     repeat(entryCount, i) {
         uint32_t tableOffset = 16u + (uint32_t) i * entryStride;
         uint32_t offset = N3DSAudio_readU32(bankData + tableOffset + 0u);
@@ -2839,7 +2868,12 @@ static void N3DSAudio_init(AudioSystem* base, DataWin* dataWin, FileSystem* file
     audio->roomPrewarmByteBudget = audio->isNew3DS ? N3DS_ROOM_PREWARM_BYTE_BUDGET_NEW3DS : N3DS_ROOM_PREWARM_BYTE_BUDGET_OLD3DS;
     audio->backgroundPrewarmSoundCount = audio->isNew3DS ? N3DS_BACKGROUND_PREWARM_SOUND_COUNT_NEW3DS : N3DS_BACKGROUND_PREWARM_SOUND_COUNT_OLD3DS;
     audio->backgroundPrewarmByteBudget = audio->isNew3DS ? N3DS_BACKGROUND_PREWARM_BYTE_BUDGET_NEW3DS : N3DS_BACKGROUND_PREWARM_BYTE_BUDGET_OLD3DS;
-    N3DSAudio_loadPackedSoundBank(audio);
+    if (!N3DSAudio_loadPackedSoundBank(audio)) {
+        if (audio->startupError[0] == '\0') {
+            snprintf(audio->startupError, sizeof(audio->startupError), "Sound bank load failed. Press START.");
+        }
+        return;
+    }
 
     // Installed CIAs do not receive Homebrew Launcher's hb:ndsp handle.
     // Prefer a user-supplied DSP component embedded in the CIA RomFS; when it
