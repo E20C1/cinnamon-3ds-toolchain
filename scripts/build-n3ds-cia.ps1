@@ -408,13 +408,16 @@ if ($effectiveSkipPreprocess) {
             $sourceManifest = Get-Content -LiteralPath $sourceManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
             $currentDataWinHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $dataWinPath).Hash.ToLowerInvariant()
             $currentExternalAudio = Get-ExternalAudioFingerprint -DataWinPath $dataWinPath
+            $currentPreprocessorHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $preprocessorPath).Hash.ToLowerInvariant()
             $manifestAudio = $sourceManifest.external_audio
             $sourceIsCurrent =
                 ([string]$sourceManifest.data_win_sha256).ToLowerInvariant() -eq $currentDataWinHash -and
                 $null -ne $manifestAudio -and
                 ([int]$manifestAudio.file_count) -eq ([int]$currentExternalAudio.file_count) -and
                 ([int64]$manifestAudio.total_bytes) -eq ([int64]$currentExternalAudio.total_bytes) -and
-                ([string]$manifestAudio.sha256).ToLowerInvariant() -eq ([string]$currentExternalAudio.sha256).ToLowerInvariant()
+                ([string]$manifestAudio.sha256).ToLowerInvariant() -eq ([string]$currentExternalAudio.sha256).ToLowerInvariant() -and
+                $sourceManifest.PSObject.Properties.Name -contains "preprocessor_sha256" -and
+                ([string]$sourceManifest.preprocessor_sha256).ToLowerInvariant() -eq $currentPreprocessorHash
         }
         catch {
             $sourceIsCurrent = $false
@@ -423,7 +426,7 @@ if ($effectiveSkipPreprocess) {
 
     if (-not $sourceIsCurrent) {
         Write-Host ""
-        Write-Host "External audio/data.win changed since the last preprocess; refreshing 3DS assets despite -SkipPreprocess." -ForegroundColor Yellow
+        Write-Host "Preprocess inputs or preprocessor changed; refreshing 3DS assets despite -SkipPreprocess." -ForegroundColor Yellow
         $effectiveSkipPreprocess = $false
     }
 }
