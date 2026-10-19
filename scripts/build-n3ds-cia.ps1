@@ -27,7 +27,8 @@ param(
     [switch]$DisableBottomScreen,
     [switch]$SkipPreprocessorBuild,
     [switch]$SkipPreprocess,
-    [switch]$KeepStaging
+    [switch]$KeepStaging,
+    [switch]$NoToolDownload
 )
 
 $ErrorActionPreference = "Stop"
@@ -95,6 +96,95 @@ function Resolve-Executable {
         }
     }
     return $null
+}
+
+
+function Install-PinnedPackagingTool {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ToolKey
+    )
+
+    $manifestPath = Join-Path $repoRoot "resources\3ds\meta\packaging-tools.json"
+    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+        throw "Pinned packaging tool manifest was not found: $manifestPath"
+    }
+
+    $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $platform = $manifest.windows_x86_64
+    if ($null -eq $platform) {
+        throw "packaging-tools.json does not define windows_x86_64 tools."
+    }
+
+    $tool = $platform.PSObject.Properties[$ToolKey].Value
+    if ($null -eq $tool) {
+        throw "Unknown pinned packaging tool: $ToolKey"
+    }
+
+    $toolRoot = Join-Path $repoRoot ("build\tools\n3ds-packaging\{0}-{1}" -f $ToolKey, [string]$tool.version)
+    $existing = Get-ChildItem -LiteralPath $toolRoot -Recurse -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -ieq [string]$tool.executable } |
+        Select-Object -First 1 -ExpandProperty FullName
+    if ($existing) {
+        return (Resolve-Path -LiteralPath $existing).Path
+    }
+
+    New-Item -ItemType Directory -Force -Path $toolRoot | Out-Null
+    $archivePath = Join-Path $toolRoot ("{0}-{1}.zip" -f $ToolKey, [string]$tool.version)
+
+    Write-Host ""
+    Write-Host "Downloading pinned $ToolKey $($tool.version)..."
+    Write-Host "  Source: $($tool.source)"
+    Write-Host "  URL:    $($tool.url)"
+
+    try {
+        Invoke-WebRequest -Uri ([string]$tool.url) -OutFile $archivePath -UseBasicParsing
+    }
+    catch {
+        if (Test-Path -LiteralPath $archivePath) {
+            Remove-Item -LiteralPath $archivePath -Force -ErrorAction SilentlyContinue
+        }
+        throw "Failed to download $ToolKey from the pinned GitHub release: $($_.Exception.Message)"
+    }
+
+    $actualSize = (Get-Item -LiteralPath $archivePath).Length
+    $expectedSize = [int64]$tool.archive_size
+    if ($expectedSize -gt 0 -and $actualSize -ne $expectedSize) {
+        Remove-Item -LiteralPath $archivePath -Force -ErrorAction SilentlyContinue
+        throw "$ToolKey archive size verification failed. Expected $expectedSize bytes, got $actualSize bytes."
+    }
+
+    $expectedSha256 = [string]$tool.sha256
+    if ($expectedSha256) {
+        $actualSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $archivePath).Hash.ToLowerInvariant()
+        if ($actualSha256 -ne $expectedSha256.ToLowerInvariant()) {
+            Remove-Item -LiteralPath $archivePath -Force -ErrorAction SilentlyContinue
+            throw "$ToolKey SHA-256 verification failed. Expected $expectedSha256, got $actualSha256."
+        }
+    } else {
+        Write-Warning "$ToolKey release does not publish a SHA-256 digest; verified pinned URL and archive size only."
+    }
+
+    try {
+        Expand-Archive -LiteralPath $archivePath -DestinationPath $toolRoot -Force
+    }
+    finally {
+        if (Test-Path -LiteralPath $archivePath) {
+            Remove-Item -LiteralPath $archivePath -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    $executable = Get-ChildItem -LiteralPath $toolRoot -Recurse -File |
+        Where-Object { $_.Name -ieq [string]$tool.executable } |
+        Select-Object -First 1 -ExpandProperty FullName
+
+    if (-not $executable) {
+        throw "$ToolKey archive extracted successfully, but $($tool.executable) was not found under $toolRoot."
+    }
+
+    $resolved = (Resolve-Path -LiteralPath $executable).Path
+    Write-Host "  Installed: $resolved"
+    return $resolved
 }
 
 function Get-ExistingPreprocessor {
@@ -327,10 +417,16 @@ $bannertoolPath = Resolve-Executable -ExplicitPath $Bannertool -CommandNames @("
 ) -Label "bannertool"
 
 if (-not $makeromPath) {
-    throw "makerom was not found. Add it to PATH or pass -Makerom <path>."
+    if ($NoToolDownload) {
+        throw "makerom was not found and -NoToolDownload was specified. Add it to PATH or pass -Makerom <path>."
+    }
+    $makeromPath = Install-PinnedPackagingTool -ToolKey "makerom"
 }
 if (-not $bannertoolPath) {
-    throw "bannertool was not found. Add it to PATH or pass -Bannertool <path>."
+    if ($NoToolDownload) {
+        throw "bannertool was not found and -NoToolDownload was specified. Add it to PATH or pass -Bannertool <path>."
+    }
+    $bannertoolPath = Install-PinnedPackagingTool -ToolKey "bannertool"
 }
 if (-not (Test-Path -LiteralPath $rsfPath -PathType Leaf)) {
     throw "CIA RSF template was not found: $rsfPath"
