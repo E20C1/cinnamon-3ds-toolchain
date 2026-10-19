@@ -24,6 +24,9 @@
         "drag_deadzone_px": 18,
         "battle_follow_enabled": true,
         "battle_follow_target_token": "obj_heart",
+        "battle_follow_target_object_index": 743,
+        "battle_follow_active_self_var": "movement",
+        "battle_follow_active_greater_than": 0,
         "battle_follow_tolerance": 4
       }
     }
