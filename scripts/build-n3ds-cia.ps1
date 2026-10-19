@@ -552,7 +552,7 @@ try {
         "-DAPP_ENCRYPTED=false",
         "-DAPP_ROMFS=$romfsMakeromPath",
         "-DAPP_SYSTEM_MODE=64MB",
-        "-DAPP_SYSTEM_MODE_EXT=Legacy",
+        "-DAPP_SYSTEM_MODE_EXT=124MB",
         "-DAPP_CPU_SPEED=804MHz",
         "-DAPP_ENABLE_L2_CACHE=true",
         "-DAPP_CAN_ACCESS_CORE2=false",
