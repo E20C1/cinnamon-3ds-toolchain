@@ -279,6 +279,14 @@ function Resolve-MetadataAsset {
     return (Resolve-Path -LiteralPath $candidate).Path
 }
 
+function Get-OptionalProperty {
+    param($Object, [string]$Name, $Fallback)
+    if ($null -eq $Object) { return $Fallback }
+    $property = $Object.PSObject.Properties[$Name]
+    if ($null -eq $property) { return $Fallback }
+    return $property.Value
+}
+
 function Test-GamePresetMatch {
     param($Preset, $Metadata)
 
@@ -494,6 +502,24 @@ try {
     }
     Copy-Item -LiteralPath $dataWinPath -Destination (Join-Path $romfsPath "data.win") -Force
     Copy-Item -LiteralPath $dspFirmPath -Destination (Join-Path $romfsPath "dspfirm.cdc") -Force
+
+    $inputPreset = Get-OptionalProperty -Object $preset -Name "input" -Fallback $null
+    $touchEnabled = [bool](Get-OptionalProperty -Object $inputPreset -Name "touch_enabled" -Fallback $false)
+    if ($touchEnabled) {
+        $tapKeyCode = [int](Get-OptionalProperty -Object $inputPreset -Name "tap_key_code" -Fallback 90)
+        $tapMaxMs = [int](Get-OptionalProperty -Object $inputPreset -Name "tap_max_ms" -Fallback 180)
+        $tapMaxMovePx = [int](Get-OptionalProperty -Object $inputPreset -Name "tap_max_move_px" -Fallback 10)
+        $dragDeadzonePx = [int](Get-OptionalProperty -Object $inputPreset -Name "drag_deadzone_px" -Fallback 18)
+        $inputProfilePath = Join-Path $romfsPath "cinnamon_input_profile.cfg"
+        @(
+            "schema=1",
+            "touch_enabled=1",
+            "tap_key_code=$tapKeyCode",
+            "tap_max_ms=$tapMaxMs",
+            "tap_max_move_px=$tapMaxMovePx",
+            "drag_deadzone_px=$dragDeadzonePx"
+        ) | Set-Content -LiteralPath $inputProfilePath -Encoding ASCII
+    }
 
     Write-Host ""
     Write-Host "Building Nintendo 3DS ELF for CIA packaging..."
