@@ -48,6 +48,101 @@ typedef struct {
     u64 sampleStartMs;
 } N3DSDebugMonitor;
 
+typedef struct {
+    bool touchEnabled;
+    int32_t tapKeyCode;
+    uint32_t tapMaxMs;
+    int32_t tapMaxMovePx;
+    int32_t dragDeadzonePx;
+} N3DSInputProfile;
+
+typedef struct {
+    bool active;
+    bool tapCancelled;
+    touchPosition start;
+    touchPosition current;
+    u64 startMs;
+    int32_t maxMoveSquared;
+    uint8_t tapPulseFrames;
+} N3DSTouchState;
+
+static void N3DSInputProfile_setDefaults(N3DSInputProfile* profile) {
+    if (profile == NULL) return;
+    memset(profile, 0, sizeof(*profile));
+    profile->tapKeyCode = 'Z';
+    profile->tapMaxMs = 180u;
+    profile->tapMaxMovePx = 10;
+    profile->dragDeadzonePx = 18;
+}
+
+static void N3DSInputProfile_load(N3DSInputProfile* profile, const char* path) {
+    if (profile == NULL) return;
+    N3DSInputProfile_setDefaults(profile);
+    if (path == NULL) return;
+
+    FILE* file = fopen(path, "rb");
+    if (file == NULL) return;
+
+    char line[96];
+    while (fgets(line, sizeof(line), file) != NULL) {
+        char key[64];
+        int value = 0;
+        if (sscanf(line, " %63[^=]=%d", key, &value) != 2) continue;
+        if (strcmp(key, "touch_enabled") == 0) profile->touchEnabled = value != 0;
+        else if (strcmp(key, "tap_key_code") == 0) profile->tapKeyCode = value;
+        else if (strcmp(key, "tap_max_ms") == 0 && value > 0) profile->tapMaxMs = (uint32_t) value;
+        else if (strcmp(key, "tap_max_move_px") == 0 && value > 0) profile->tapMaxMovePx = value;
+        else if (strcmp(key, "drag_deadzone_px") == 0 && value > 0) profile->dragDeadzonePx = value;
+    }
+    fclose(file);
+
+    if (profile->tapKeyCode < 0 || profile->tapKeyCode > 255) profile->tapKeyCode = 'Z';
+    if (profile->tapMaxMs < 40u || profile->tapMaxMs > 1000u) profile->tapMaxMs = 180u;
+    if (profile->tapMaxMovePx < 2 || profile->tapMaxMovePx > 64) profile->tapMaxMovePx = 10;
+    if (profile->dragDeadzonePx < profile->tapMaxMovePx || profile->dragDeadzonePx > 120) profile->dragDeadzonePx = 18;
+}
+
+static void N3DSTouchState_update(
+    N3DSTouchState* state,
+    const N3DSInputProfile* profile,
+    u32 held,
+    u32 down,
+    u32 up
+) {
+    if (state == NULL || profile == NULL || !profile->touchEnabled) return;
+
+    u64 nowMs = osGetTime();
+    if (down & KEY_TOUCH) {
+        memset(state, 0, sizeof(*state));
+        state->active = true;
+        state->startMs = nowMs;
+        hidTouchRead(&state->start);
+        state->current = state->start;
+    }
+
+    if (state->active && (held & KEY_TOUCH)) {
+        hidTouchRead(&state->current);
+        int32_t dx = (int32_t) state->current.px - (int32_t) state->start.px;
+        int32_t dy = (int32_t) state->current.py - (int32_t) state->start.py;
+        int32_t moveSquared = dx * dx + dy * dy;
+        if (moveSquared > state->maxMoveSquared) state->maxMoveSquared = moveSquared;
+
+        int32_t tapMoveSquared = profile->tapMaxMovePx * profile->tapMaxMovePx;
+        if (state->maxMoveSquared > tapMoveSquared || nowMs - state->startMs > profile->tapMaxMs) {
+            state->tapCancelled = true;
+        }
+    }
+
+    if (state->active && (up & KEY_TOUCH)) {
+        u64 elapsedMs = nowMs - state->startMs;
+        int32_t tapMoveSquared = profile->tapMaxMovePx * profile->tapMaxMovePx;
+        if (!state->tapCancelled && elapsedMs <= profile->tapMaxMs && state->maxMoveSquared <= tapMoveSquared) {
+            state->tapPulseFrames = 1u;
+        }
+        state->active = false;
+    }
+}
+
 static bool fileExists(const char* path) {
     struct stat st;
     return stat(path, &st) == 0;
@@ -687,6 +782,10 @@ int main(int argc, char** argv) {
     mkdir("sdmc:/3ds", 0777);
     mkdir("sdmc:/3ds/cinnamon", 0777);
 
+    N3DSInputProfile inputProfile;
+    N3DSInputProfile_load(&inputProfile, "romfs:/cinnamon_input_profile.cfg");
+    N3DSTouchState touchState = {0};
+
     char* dataWinPath = chooseDataWinPath();
 
     N3DSLoadingScreen loadingScreen = {0};
@@ -809,6 +908,7 @@ int main(int argc, char** argv) {
     bool leftHeld = false, rightHeld = false, upHeld = false, downHeld = false;
     bool aHeld = false, bHeld = false, yHeld = false;
     bool lHeld = false, rHeld = false;
+    bool touchActionHeld = false;
 
     Gen8* gen8 = &dataWin->gen8;
     int32_t gameW = (int32_t) gen8->defaultWindowWidth;
@@ -821,8 +921,8 @@ int main(int argc, char** argv) {
         hidScanInput();
         u32 held = hidKeysHeld();
         u32 down = hidKeysDown();
+        u32 up = hidKeysUp();
 
-        if (down & KEY_START) break;
         if (down & KEY_SELECT) debugMonitorVisible = !debugMonitorVisible;
         bool debugWarpToAsriel = debugMonitorVisible && (down & KEY_L) &&
             (uint32_t) N3DS_DEBUG_ASRIEL_ROOM < runner->dataWin->room.count;
@@ -830,17 +930,51 @@ int main(int argc, char** argv) {
             runner->pendingRoom = N3DS_DEBUG_ASRIEL_ROOM;
         }
 
+        N3DSTouchState_update(&touchState, &inputProfile, held, down, up);
+
+        bool touchLeft = false;
+        bool touchRight = false;
+        bool touchUp = false;
+        bool touchDown = false;
+        if (inputProfile.touchEnabled && touchState.active && touchState.tapCancelled) {
+            int32_t dx = (int32_t) touchState.current.px - (int32_t) touchState.start.px;
+            int32_t dy = (int32_t) touchState.current.py - (int32_t) touchState.start.py;
+            touchLeft = dx < -inputProfile.dragDeadzonePx;
+            touchRight = dx > inputProfile.dragDeadzonePx;
+            touchUp = dy < -inputProfile.dragDeadzonePx;
+            touchDown = dy > inputProfile.dragDeadzonePx;
+        }
+        bool touchTap = inputProfile.touchEnabled && touchState.tapPulseFrames > 0u;
+
         circlePosition circle;
         hidCircleRead(&circle);
 
-        syncKey(runner->keyboard, &leftHeld, VK_LEFT, (held & KEY_LEFT) || circle.dx < -80);
-        syncKey(runner->keyboard, &rightHeld, VK_RIGHT, (held & KEY_RIGHT) || circle.dx > 80);
-        syncKey(runner->keyboard, &upHeld, VK_UP, (held & KEY_UP) || circle.dy > 80);
-        syncKey(runner->keyboard, &downHeld, VK_DOWN, (held & KEY_DOWN) || circle.dy < -80);
+        bool leftInput = (held & KEY_LEFT) || circle.dx < -80 || touchLeft;
+        bool rightInput = (held & KEY_RIGHT) || circle.dx > 80 || touchRight;
+        bool upInput = (held & KEY_UP) || circle.dy > 80 || touchUp;
+        bool downInput = (held & KEY_DOWN) || circle.dy < -80 || touchDown;
+        bool aInput = (held & KEY_A) || (touchTap && inputProfile.tapKeyCode == 'Z');
+        bool bInput = (held & KEY_B) || (touchTap && inputProfile.tapKeyCode == 'X');
+        bool cInput = (held & KEY_Y) || (held & KEY_X) || (touchTap && inputProfile.tapKeyCode == 'C');
 
-        syncKey(runner->keyboard, &aHeld, 'Z', (held & KEY_A));
-        syncKey(runner->keyboard, &bHeld, 'X', (held & KEY_B));
-        syncKey(runner->keyboard, &yHeld, 'C', (held & KEY_Y) || (held & KEY_X));
+        if (touchTap && inputProfile.tapKeyCode == VK_LEFT) leftInput = true;
+        if (touchTap && inputProfile.tapKeyCode == VK_RIGHT) rightInput = true;
+        if (touchTap && inputProfile.tapKeyCode == VK_UP) upInput = true;
+        if (touchTap && inputProfile.tapKeyCode == VK_DOWN) downInput = true;
+
+        syncKey(runner->keyboard, &leftHeld, VK_LEFT, leftInput);
+        syncKey(runner->keyboard, &rightHeld, VK_RIGHT, rightInput);
+        syncKey(runner->keyboard, &upHeld, VK_UP, upInput);
+        syncKey(runner->keyboard, &downHeld, VK_DOWN, downInput);
+
+        syncKey(runner->keyboard, &aHeld, 'Z', aInput);
+        syncKey(runner->keyboard, &bHeld, 'X', bInput);
+        syncKey(runner->keyboard, &yHeld, 'C', cInput);
+        if (inputProfile.tapKeyCode != 'Z' && inputProfile.tapKeyCode != 'X' && inputProfile.tapKeyCode != 'C' &&
+            inputProfile.tapKeyCode != VK_LEFT && inputProfile.tapKeyCode != VK_RIGHT &&
+            inputProfile.tapKeyCode != VK_UP && inputProfile.tapKeyCode != VK_DOWN) {
+            syncKey(runner->keyboard, &touchActionHeld, inputProfile.tapKeyCode, touchTap);
+        }
         syncKey(runner->keyboard, &lHeld, VK_PAGEDOWN, (held & KEY_L) && !debugWarpToAsriel);
         syncKey(runner->keyboard, &rHeld, VK_PAGEUP, (held & KEY_R));
 
@@ -867,6 +1001,7 @@ int main(int argc, char** argv) {
         N3DSDebugMonitor_tickFrame(&debugMonitor, (double) (osGetTime() - renderStartMs));
 
         RunnerKeyboard_beginFrame(runner->keyboard);
+        if (touchState.tapPulseFrames > 0u) touchState.tapPulseFrames--;
     }
 
     audioSystem->vtable->destroy(audioSystem);
