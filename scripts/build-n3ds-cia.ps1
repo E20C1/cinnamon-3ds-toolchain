@@ -510,6 +510,9 @@ try {
         $tapMaxMs = [int](Get-OptionalProperty -Object $inputPreset -Name "tap_max_ms" -Fallback 180)
         $tapMaxMovePx = [int](Get-OptionalProperty -Object $inputPreset -Name "tap_max_move_px" -Fallback 10)
         $dragDeadzonePx = [int](Get-OptionalProperty -Object $inputPreset -Name "drag_deadzone_px" -Fallback 18)
+        $battleFollowEnabled = [bool](Get-OptionalProperty -Object $inputPreset -Name "battle_follow_enabled" -Fallback $false)
+        $battleFollowTargetToken = [string](Get-OptionalProperty -Object $inputPreset -Name "battle_follow_target_token" -Fallback "")
+        $battleFollowTolerance = [int](Get-OptionalProperty -Object $inputPreset -Name "battle_follow_tolerance" -Fallback 4)
         $inputProfilePath = Join-Path $romfsPath "cinnamon_input_profile.cfg"
         @(
             "schema=1",
@@ -517,7 +520,10 @@ try {
             "tap_key_code=$tapKeyCode",
             "tap_max_ms=$tapMaxMs",
             "tap_max_move_px=$tapMaxMovePx",
-            "drag_deadzone_px=$dragDeadzonePx"
+            "drag_deadzone_px=$dragDeadzonePx",
+            "battle_follow_enabled=$(if ($battleFollowEnabled) { 1 } else { 0 })",
+            "battle_follow_target_token=$battleFollowTargetToken",
+            "battle_follow_tolerance=$battleFollowTolerance"
         ) | Set-Content -LiteralPath $inputProfilePath -Encoding ASCII
     }
 
