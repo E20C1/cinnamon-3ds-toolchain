@@ -4987,9 +4987,11 @@ static bool convertStreamedMusicBcwavs(Options* options, DataWin* dataWin) {
     if (options == NULL || dataWin == NULL) return false;
 
     bool allOk = true;
-    uint32_t convertedCount = 0;
+    uint32_t convertedExternalCount = 0;
+    uint32_t convertedEmbeddedCount = 0;
     uint32_t preservedCount = 0;
-    uint32_t skippedCount = 0;
+    uint32_t skippedMissingCount = 0;
+    uint32_t skippedDecodeCount = 0;
 
     repeat(dataWin->sond.count, soundIndex) {
         const Sound* sound = &dataWin->sond.sounds[soundIndex];
@@ -5004,45 +5006,112 @@ static bool convertStreamedMusicBcwavs(Options* options, DataWin* dataWin) {
         snprintf(outPath, sizeof(outPath), "%s/%s.bcwav", options->outputDir, baseName);
 
         char* externalSourcePath = resolveExternalSoundPath(options, sound);
-        if (externalSourcePath == NULL) {
-            if (fileExists(outPath)) {
-                preservedCount++;
+        if (externalSourcePath != NULL) {
+            remove(outPath);
+            fprintf(
+                stderr,
+                "n3ds-preprocess: music %05zu -> %s [external: %s]\n",
+                soundIndex,
+                outPath,
+                externalSourcePath
+            );
+
+            bool ok = writeBcwavFromInputFile(externalSourcePath, outPath);
+            free(externalSourcePath);
+
+            if (!ok) {
+                fprintf(stderr, "Failed to write streamed music BCWAV for sound %zu from external source\n", soundIndex);
+                allOk = false;
                 continue;
             }
-            if (sound->name != NULL && sound->name[0] != '\0') {
-                fprintf(stderr, "Skipping streamed music %zu (%s): no external audio source found\n", soundIndex, sound->name);
-            }
-            skippedCount++;
+
+            convertedExternalCount++;
             continue;
         }
 
-        remove(outPath);
+        int32_t audioFile = sound->audioFile;
+        const uint8_t* embeddedData = NULL;
+        uint32_t embeddedSize = 0;
+        if (audioFile >= 0 && (uint32_t) audioFile < dataWin->audo.count) {
+            AudioEntry* entry = &dataWin->audo.entries[audioFile];
+            embeddedData = entry->data;
+            embeddedSize = entry->dataSize;
+        }
+
+        if (embeddedData != NULL && embeddedSize > 0) {
+            WavPcm16 pcm;
+            memset(&pcm, 0, sizeof(pcm));
+            if (loadAudioPcm16FromMemory(embeddedData, embeddedSize, &pcm)) {
+                remove(outPath);
+                fprintf(
+                    stderr,
+                    "n3ds-preprocess: music %05zu -> %s [embedded AUDO=%d bytes=%u]\n",
+                    soundIndex,
+                    outPath,
+                    audioFile,
+                    embeddedSize
+                );
+
+                bool ok = writeBcwavFile(outPath, &pcm);
+                freeWavPcm16(&pcm);
+                if (!ok) {
+                    fprintf(
+                        stderr,
+                        "Failed to write streamed music BCWAV for sound %zu from embedded AUDO=%d (%u bytes)\n",
+                        soundIndex,
+                        audioFile,
+                        embeddedSize
+                    );
+                    allOk = false;
+                    continue;
+                }
+
+                convertedEmbeddedCount++;
+                continue;
+            }
+
+            fprintf(
+                stderr,
+                "Skipping streamed music %zu (%s): embedded AUDO=%d exists (%u bytes) but could not be decoded\n",
+                soundIndex,
+                sound->name != NULL ? sound->name : "<unnamed>",
+                audioFile,
+                embeddedSize
+            );
+            skippedDecodeCount++;
+            continue;
+        }
+
+        if (fileExists(outPath)) {
+            fprintf(
+                stderr,
+                "Preserving streamed music %zu (%s): no external/embedded source, existing BCWAV retained [audioFile=%d]\n",
+                soundIndex,
+                sound->name != NULL ? sound->name : "<unnamed>",
+                audioFile
+            );
+            preservedCount++;
+            continue;
+        }
+
         fprintf(
             stderr,
-            "n3ds-preprocess: music %05zu -> %s [%s]\n",
+            "Skipping streamed music %zu (%s): no external source and no embedded AUDO [audioFile=%d]\n",
             soundIndex,
-            outPath,
-            externalSourcePath
+            sound->name != NULL ? sound->name : "<unnamed>",
+            audioFile
         );
-
-        bool ok = writeBcwavFromInputFile(externalSourcePath, outPath);
-        free(externalSourcePath);
-
-        if (!ok) {
-            fprintf(stderr, "Failed to write streamed music BCWAV for sound %zu\n", soundIndex);
-            allOk = false;
-            continue;
-        }
-
-        convertedCount++;
+        skippedMissingCount++;
     }
 
     fprintf(
         stderr,
-        "Streamed music BCWAVs: converted=%u preserved=%u skipped=%u\n",
-        convertedCount,
+        "Streamed music BCWAVs: external=%u embedded=%u preserved=%u skipped_missing=%u skipped_decode=%u\n",
+        convertedExternalCount,
+        convertedEmbeddedCount,
         preservedCount,
-        skippedCount
+        skippedMissingCount,
+        skippedDecodeCount
     );
     return allOk;
 }
