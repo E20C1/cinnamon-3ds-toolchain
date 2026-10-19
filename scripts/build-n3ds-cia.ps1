@@ -279,6 +279,14 @@ function Resolve-MetadataAsset {
     return (Resolve-Path -LiteralPath $candidate).Path
 }
 
+function Get-OptionalProperty {
+    param($Object, [string]$Name, $Fallback)
+    if ($null -eq $Object) { return $Fallback }
+    $property = $Object.PSObject.Properties[$Name]
+    if ($null -eq $property) { return $Fallback }
+    return $property.Value
+}
+
 function Test-GamePresetMatch {
     param($Preset, $Metadata)
 
@@ -495,6 +503,29 @@ try {
     Copy-Item -LiteralPath $dataWinPath -Destination (Join-Path $romfsPath "data.win") -Force
     Copy-Item -LiteralPath $dspFirmPath -Destination (Join-Path $romfsPath "dspfirm.cdc") -Force
 
+    # Generate a flat runtime profile consumed by the generic 3DS input layer.
+    # Unknown/unconfigured games remain opt-out by default.
+    $touchPreset = Get-OptionalProperty -Object $preset -Name "touch" -Fallback $null
+    $followPreset = Get-OptionalProperty -Object $touchPreset -Name "follow" -Fallback $null
+    $gameProfile = [ordered]@{
+        schema_version = 1
+        preset = $(if ($preset) { [string]$preset.id } else { "generic" })
+        touch_enabled = [bool](Get-OptionalProperty -Object $touchPreset -Name "enabled" -Fallback $false)
+        mirror_bottom_screen = [bool](Get-OptionalProperty -Object $touchPreset -Name "mirror_bottom_screen" -Fallback $false)
+        tap_key_code = [int](Get-OptionalProperty -Object $touchPreset -Name "tap_key_code" -Fallback 90)
+        tap_max_ms = [int](Get-OptionalProperty -Object $touchPreset -Name "tap_max_ms" -Fallback 180)
+        tap_max_move_px = [double](Get-OptionalProperty -Object $touchPreset -Name "tap_max_move_px" -Fallback 10.0)
+        virtual_stick_deadzone_px = [double](Get-OptionalProperty -Object $touchPreset -Name "virtual_stick_deadzone_px" -Fallback 18.0)
+        follow_enabled = [bool](Get-OptionalProperty -Object $followPreset -Name "enabled" -Fallback $false)
+        follow_condition_global = [string](Get-OptionalProperty -Object $followPreset -Name "condition_global" -Fallback "")
+        follow_condition_greater_than = [double](Get-OptionalProperty -Object $followPreset -Name "condition_greater_than" -Fallback 0.0)
+        follow_target_token = [string](Get-OptionalProperty -Object $followPreset -Name "target_token" -Fallback "")
+        follow_tolerance = [double](Get-OptionalProperty -Object $followPreset -Name "tolerance" -Fallback 4.0)
+    }
+    $gameProfilePath = Join-Path $romfsPath "cinnamon_game_profile.json"
+    $gameProfile | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $gameProfilePath -Encoding UTF8
+    Write-Host "  Touch profile: $($gameProfile.preset) (enabled=$($gameProfile.touch_enabled), mirror=$($gameProfile.mirror_bottom_screen))"
+
     Write-Host ""
     Write-Host "Building Nintendo 3DS ELF for CIA packaging..."
     # The CIA's RomFS is attached by makerom below. Avoid making a second
@@ -601,6 +632,7 @@ try {
         data_win_sha256 = $dataWinHash
         dsp_firm_sha256 = $dspFirmHash
         dsp_firm_embedded = $true
+        touch_profile = $gameProfile
         elf = $elfPath
         elf_sha256 = $elfHash
         cia = (Resolve-Path -LiteralPath $ciaPath).Path
