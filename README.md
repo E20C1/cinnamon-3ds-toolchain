@@ -149,7 +149,7 @@ The Windows CIA wrapper builds a local installable CIA from a user-supplied `dat
 
 The preprocessor exports `game_metadata.json` from the GameMaker GEN8 chunk. The CIA packager uses `displayName`, `name`, `gameID`, and `steamAppID` to select a metadata preset from `resources/3ds/meta/game-presets.json`. The UNDERTALE preset automatically selects the existing UNDERTALE 48x48 icon, 256x128 banner, banner audio, title, and title identity. Unknown GameMaker titles can provide their own preset or pass `-Icon`, `-BannerImage`, and `-BannerAudio` explicitly.
 
-The packaging step requires `makerom` and `bannertool` in `PATH`, under `$DEVKITPRO/tools/bin`, or supplied with `-Makerom` and `-Bannertool`. The copied `data.win` exists only in the temporary build RomFS and is removed after packaging unless `-KeepStaging` is used. The generated `.cia` and `data.win` are ignored by Git.
+The packaging step first looks for `makerom` and `bannertool` in `PATH`, under `$DEVKITPRO/tools/bin`, or at paths supplied with `-Makerom` and `-Bannertool`. If they are still missing, the Windows wrapper downloads pinned releases into `build/tools/n3ds-packaging`: MakeROM 0.18.4 from Project_CTR and bannertool 1.2.3 from the maintained 3ds-bannertool fork. Pass `-NoToolDownload` to require manually installed tools instead. The copied `data.win` exists only in the temporary build RomFS and is removed after packaging unless `-KeepStaging` is used. The generated `.cia` and `data.win` are ignored by Git.
 
 ## Using the 3DS preprocessor
 
