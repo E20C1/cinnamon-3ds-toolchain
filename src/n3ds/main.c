@@ -46,6 +46,12 @@ typedef struct {
     double sampledRenderMs;
     uint32_t sampledFrames;
     u64 sampleStartMs;
+    N3DSBattleTouchStatus touchFollowStatus;
+    float touchFollowActivity;
+    float touchFollowCurrentX;
+    float touchFollowCurrentY;
+    float touchFollowTargetX;
+    float touchFollowTargetY;
 } N3DSDebugMonitor;
 
 typedef struct {
@@ -56,6 +62,9 @@ typedef struct {
     int32_t dragDeadzonePx;
     bool battleFollowEnabled;
     char battleFollowTargetToken[64];
+    int32_t battleFollowTargetObjectIndex;
+    char battleFollowActiveSelfVar[64];
+    int32_t battleFollowActiveGreaterThan;
     int32_t battleFollowTolerance;
 } N3DSInputProfile;
 
@@ -76,6 +85,7 @@ static void N3DSInputProfile_setDefaults(N3DSInputProfile* profile) {
     profile->tapMaxMs = 180u;
     profile->tapMaxMovePx = 10;
     profile->dragDeadzonePx = 18;
+    profile->battleFollowTargetObjectIndex = -1;
     profile->battleFollowTolerance = 4;
 }
 
@@ -102,6 +112,11 @@ static void N3DSInputProfile_load(N3DSInputProfile* profile, const char* path) {
         else if (strcmp(key, "battle_follow_target_token") == 0) {
             snprintf(profile->battleFollowTargetToken, sizeof(profile->battleFollowTargetToken), "%s", valueText);
         }
+        else if (strcmp(key, "battle_follow_target_object_index") == 0) profile->battleFollowTargetObjectIndex = value;
+        else if (strcmp(key, "battle_follow_active_self_var") == 0) {
+            snprintf(profile->battleFollowActiveSelfVar, sizeof(profile->battleFollowActiveSelfVar), "%s", valueText);
+        }
+        else if (strcmp(key, "battle_follow_active_greater_than") == 0) profile->battleFollowActiveGreaterThan = value;
         else if (strcmp(key, "battle_follow_tolerance") == 0 && value > 0) profile->battleFollowTolerance = value;
     }
     fclose(file);
@@ -362,6 +377,7 @@ static void N3DSDebugMonitor_draw(N3DSDebugMonitor* monitor, Runner* runner, Ren
     char ramLine[96];
     char audioLine[96];
     char roomLine[96];
+    char touchLine[96];
     char vramUsed[24];
     char vramTotal[24];
     char atlasUsed[24];
@@ -414,12 +430,23 @@ static void N3DSDebugMonitor_draw(N3DSDebugMonitor* monitor, Runner* runner, Ren
         audioCached,
         audioLimit);
     snprintf(roomLine, sizeof(roomLine), "R %.28s", roomName);
+    snprintf(
+        touchLine,
+        sizeof(touchLine),
+        "TF%d MV%.0f C%.0f,%.0f T%.0f,%.0f",
+        (int) monitor->touchFollowStatus,
+        monitor->touchFollowActivity,
+        monitor->touchFollowCurrentX,
+        monitor->touchFollowCurrentY,
+        monitor->touchFollowTargetX,
+        monitor->touchFollowTargetY
+    );
 
     N3DSRenderer_beginBottomScreenGUI(renderer, 320, 240);
     const float boxX = 92.0f;
     const float boxY = 8.0f;
     const float boxW = 220.0f;
-    const float boxH = 110.0f;
+    const float boxH = 127.0f;
     const float textX = boxX + 7.0f;
     C2D_DrawRectSolid(boxX, boxY, 0.0f, boxW, boxH, C2D_Color32(8, 10, 16, 218));
     C2D_DrawRectSolid(boxX, boxY, 0.0f, boxW, 2.0f, C2D_Color32(77, 118, 255, 245));
@@ -431,6 +458,7 @@ static void N3DSDebugMonitor_draw(N3DSDebugMonitor* monitor, Runner* runner, Ren
     N3DSDebugTinyFont_drawText(ramLine, textX, boxY + 59.0f, C2D_Color32(196, 230, 255, 255));
     N3DSDebugTinyFont_drawText(audioLine, textX, boxY + 76.0f, C2D_Color32(196, 255, 196, 255));
     N3DSDebugTinyFont_drawText(roomLine, textX, boxY + 93.0f, C2D_Color32(255, 230, 163, 255));
+    N3DSDebugTinyFont_drawText(touchLine, textX, boxY + 110.0f, C2D_Color32(255, 190, 224, 255));
     N3DSRenderer_endBottomScreenGUI(renderer);
 }
 
@@ -951,19 +979,33 @@ int main(int argc, char** argv) {
         if (inputProfile.touchEnabled && touchState.active && touchState.tapCancelled) {
             bool usedBattleFollow = false;
             if (inputProfile.battleFollowEnabled) {
+                float activity = 0.0f;
                 float currentX = 0.0f;
                 float currentY = 0.0f;
                 float targetX = 0.0f;
                 float targetY = 0.0f;
-                if (Runner_get3DSBattleTouchTarget(
-                        runner,
-                        inputProfile.battleFollowTargetToken,
-                        (float) touchState.current.px,
-                        (float) touchState.current.py,
-                        &currentX,
-                        &currentY,
-                        &targetX,
-                        &targetY)) {
+                N3DSBattleTouchStatus followStatus = Runner_get3DSBattleTouchTarget(
+                    runner,
+                    inputProfile.battleFollowTargetToken,
+                    inputProfile.battleFollowTargetObjectIndex,
+                    inputProfile.battleFollowActiveSelfVar,
+                    (float) inputProfile.battleFollowActiveGreaterThan,
+                    (float) touchState.current.px,
+                    (float) touchState.current.py,
+                    &activity,
+                    &currentX,
+                    &currentY,
+                    &targetX,
+                    &targetY
+                );
+                debugMonitor.touchFollowStatus = followStatus;
+                debugMonitor.touchFollowActivity = activity;
+                debugMonitor.touchFollowCurrentX = currentX;
+                debugMonitor.touchFollowCurrentY = currentY;
+                debugMonitor.touchFollowTargetX = targetX;
+                debugMonitor.touchFollowTargetY = targetY;
+
+                if (followStatus == N3DS_BATTLE_TOUCH_READY) {
                     float tolerance = (float) inputProfile.battleFollowTolerance;
                     touchLeft = currentX > targetX + tolerance;
                     touchRight = currentX < targetX - tolerance;
