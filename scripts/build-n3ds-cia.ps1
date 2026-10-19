@@ -512,6 +512,9 @@ try {
         $dragDeadzonePx = [int](Get-OptionalProperty -Object $inputPreset -Name "drag_deadzone_px" -Fallback 18)
         $battleFollowEnabled = [bool](Get-OptionalProperty -Object $inputPreset -Name "battle_follow_enabled" -Fallback $false)
         $battleFollowTargetToken = [string](Get-OptionalProperty -Object $inputPreset -Name "battle_follow_target_token" -Fallback "")
+        $battleFollowTargetObjectIndex = [int](Get-OptionalProperty -Object $inputPreset -Name "battle_follow_target_object_index" -Fallback -1)
+        $battleFollowActiveSelfVar = [string](Get-OptionalProperty -Object $inputPreset -Name "battle_follow_active_self_var" -Fallback "")
+        $battleFollowActiveGreaterThan = [int](Get-OptionalProperty -Object $inputPreset -Name "battle_follow_active_greater_than" -Fallback 0)
         $battleFollowTolerance = [int](Get-OptionalProperty -Object $inputPreset -Name "battle_follow_tolerance" -Fallback 4)
         $inputProfilePath = Join-Path $romfsPath "cinnamon_input_profile.cfg"
         @(
@@ -523,6 +526,9 @@ try {
             "drag_deadzone_px=$dragDeadzonePx",
             "battle_follow_enabled=$(if ($battleFollowEnabled) { 1 } else { 0 })",
             "battle_follow_target_token=$battleFollowTargetToken",
+            "battle_follow_target_object_index=$battleFollowTargetObjectIndex",
+            "battle_follow_active_self_var=$battleFollowActiveSelfVar",
+            "battle_follow_active_greater_than=$battleFollowActiveGreaterThan",
             "battle_follow_tolerance=$battleFollowTolerance"
         ) | Set-Content -LiteralPath $inputProfilePath -Encoding ASCII
     }
