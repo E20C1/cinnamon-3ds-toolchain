@@ -54,6 +54,9 @@ typedef struct {
     uint32_t tapMaxMs;
     int32_t tapMaxMovePx;
     int32_t dragDeadzonePx;
+    bool battleFollowEnabled;
+    char battleFollowTargetToken[64];
+    int32_t battleFollowTolerance;
 } N3DSInputProfile;
 
 typedef struct {
@@ -73,6 +76,7 @@ static void N3DSInputProfile_setDefaults(N3DSInputProfile* profile) {
     profile->tapMaxMs = 180u;
     profile->tapMaxMovePx = 10;
     profile->dragDeadzonePx = 18;
+    profile->battleFollowTolerance = 4;
 }
 
 static void N3DSInputProfile_load(N3DSInputProfile* profile, const char* path) {
@@ -83,16 +87,22 @@ static void N3DSInputProfile_load(N3DSInputProfile* profile, const char* path) {
     FILE* file = fopen(path, "rb");
     if (file == NULL) return;
 
-    char line[96];
+    char line[160];
     while (fgets(line, sizeof(line), file) != NULL) {
         char key[64];
-        int value = 0;
-        if (sscanf(line, " %63[^=]=%d", key, &value) != 2) continue;
+        char valueText[80];
+        if (sscanf(line, " %63[^=]=%79[^\r\n]", key, valueText) != 2) continue;
+        int value = atoi(valueText);
         if (strcmp(key, "touch_enabled") == 0) profile->touchEnabled = value != 0;
         else if (strcmp(key, "tap_key_code") == 0) profile->tapKeyCode = value;
         else if (strcmp(key, "tap_max_ms") == 0 && value > 0) profile->tapMaxMs = (uint32_t) value;
         else if (strcmp(key, "tap_max_move_px") == 0 && value > 0) profile->tapMaxMovePx = value;
         else if (strcmp(key, "drag_deadzone_px") == 0 && value > 0) profile->dragDeadzonePx = value;
+        else if (strcmp(key, "battle_follow_enabled") == 0) profile->battleFollowEnabled = value != 0;
+        else if (strcmp(key, "battle_follow_target_token") == 0) {
+            snprintf(profile->battleFollowTargetToken, sizeof(profile->battleFollowTargetToken), "%s", valueText);
+        }
+        else if (strcmp(key, "battle_follow_tolerance") == 0 && value > 0) profile->battleFollowTolerance = value;
     }
     fclose(file);
 
@@ -100,6 +110,8 @@ static void N3DSInputProfile_load(N3DSInputProfile* profile, const char* path) {
     if (profile->tapMaxMs < 40u || profile->tapMaxMs > 1000u) profile->tapMaxMs = 180u;
     if (profile->tapMaxMovePx < 2 || profile->tapMaxMovePx > 64) profile->tapMaxMovePx = 10;
     if (profile->dragDeadzonePx < profile->tapMaxMovePx || profile->dragDeadzonePx > 120) profile->dragDeadzonePx = 18;
+    if (profile->battleFollowTolerance < 1 || profile->battleFollowTolerance > 64) profile->battleFollowTolerance = 4;
+    if (profile->battleFollowTargetToken[0] == '\0') profile->battleFollowEnabled = false;
 }
 
 static void N3DSTouchState_update(
@@ -937,12 +949,38 @@ int main(int argc, char** argv) {
         bool touchUp = false;
         bool touchDown = false;
         if (inputProfile.touchEnabled && touchState.active && touchState.tapCancelled) {
-            int32_t dx = (int32_t) touchState.current.px - (int32_t) touchState.start.px;
-            int32_t dy = (int32_t) touchState.current.py - (int32_t) touchState.start.py;
-            touchLeft = dx < -inputProfile.dragDeadzonePx;
-            touchRight = dx > inputProfile.dragDeadzonePx;
-            touchUp = dy < -inputProfile.dragDeadzonePx;
-            touchDown = dy > inputProfile.dragDeadzonePx;
+            bool usedBattleFollow = false;
+            if (inputProfile.battleFollowEnabled) {
+                float currentX = 0.0f;
+                float currentY = 0.0f;
+                float targetX = 0.0f;
+                float targetY = 0.0f;
+                if (Runner_get3DSBattleTouchTarget(
+                        runner,
+                        inputProfile.battleFollowTargetToken,
+                        (float) touchState.current.px,
+                        (float) touchState.current.py,
+                        &currentX,
+                        &currentY,
+                        &targetX,
+                        &targetY)) {
+                    float tolerance = (float) inputProfile.battleFollowTolerance;
+                    touchLeft = currentX > targetX + tolerance;
+                    touchRight = currentX < targetX - tolerance;
+                    touchUp = currentY > targetY + tolerance;
+                    touchDown = currentY < targetY - tolerance;
+                    usedBattleFollow = true;
+                }
+            }
+
+            if (!usedBattleFollow) {
+                int32_t dx = (int32_t) touchState.current.px - (int32_t) touchState.start.px;
+                int32_t dy = (int32_t) touchState.current.py - (int32_t) touchState.start.py;
+                touchLeft = dx < -inputProfile.dragDeadzonePx;
+                touchRight = dx > inputProfile.dragDeadzonePx;
+                touchUp = dy < -inputProfile.dragDeadzonePx;
+                touchDown = dy > inputProfile.dragDeadzonePx;
+            }
         }
         bool touchTap = inputProfile.touchEnabled && touchState.tapPulseFrames > 0u;
 
