@@ -737,8 +737,26 @@ N3DSBattleTouchStatus Runner_get3DSBattleTouchTarget(
         return N3DS_BATTLE_TOUCH_LAYOUT_ERROR;
     }
 
-    *outTargetX = (touchX - frameOffsetX - portOffsetX) / viewScaleX;
-    *outTargetY = (touchY - frameOffsetY - portOffsetY) / viewScaleY;
+    float targetX = (touchX - frameOffsetX - portOffsetX) / viewScaleX;
+    float targetY = (touchY - frameOffsetY - portOffsetY) / viewScaleY;
+
+    // Instance x/y is the sprite origin, not necessarily its visual center.
+    // UNDERTALE's normal 16x16 battle hearts use origin (0,0), so targeting
+    // the raw touch coordinate places the stylus on their top-left corner.
+    // Convert the visual center back to the instance-origin target using the
+    // currently active heart sprite. Center-origin variants yield zero.
+    if (best->spriteIndex >= 0 && (uint32_t) best->spriteIndex < runner->dataWin->sprt.count) {
+        Sprite* sprite = &runner->dataWin->sprt.sprites[best->spriteIndex];
+        float centerOffsetX =
+            ((float) sprite->width * 0.5f - (float) sprite->originX) * best->imageXscale;
+        float centerOffsetY =
+            ((float) sprite->height * 0.5f - (float) sprite->originY) * best->imageYscale;
+        if (isfinite(centerOffsetX)) targetX -= centerOffsetX;
+        if (isfinite(centerOffsetY)) targetY -= centerOffsetY;
+    }
+
+    *outTargetX = targetX;
+    *outTargetY = targetY;
     runner->n3dsDrawBattleStateValid = false;
     return N3DS_BATTLE_TOUCH_READY;
 }

@@ -115,6 +115,13 @@ typedef struct {
     uint32_t pulseCount;
 } N3DSBattleMenuTouchController;
 
+typedef enum {
+    N3DS_BATTLE_MENU_TOUCH_PASS_THROUGH = 0,
+    N3DS_BATTLE_MENU_TOUCH_CONSUMED = 1,
+    N3DS_BATTLE_MENU_TOUCH_ACTION = 2,
+    N3DS_BATTLE_MENU_TOUCH_CANCEL = 3
+} N3DSBattleMenuTouchResult;
+
 static int32_t N3DSBattleMenu_modeCode(float menuNo) {
     return (int32_t) lroundf(menuNo * 2.0f);
 }
@@ -153,32 +160,64 @@ static int32_t N3DSBattleMenu_nearestRow(float y, float firstY, int32_t rowCount
     return row;
 }
 
-static bool N3DSBattleMenuTouchController_capture(
+static N3DSBattleMenuTouchResult N3DSBattleMenuTouchController_capture(
     N3DSBattleMenuTouchController* controller,
     const N3DSBattleMenuState* state,
     float gameX,
     float gameY
 ) {
-    if (controller == NULL || state == NULL || !state->battleActive || state->dodgingBullets) return false;
+    if (controller == NULL || state == NULL || !state->battleActive || state->dodgingBullets) {
+        return N3DS_BATTLE_MENU_TOUCH_PASS_THROUGH;
+    }
     N3DSBattleMenuTouchController_reset(controller);
 
     float borderLeft = state->idealBorder[0];
     float borderTop = state->idealBorder[2];
 
+    // myfight==3 is still a modal battle choice. Own every tap while it is
+    // visible so blank-space taps cannot leak through as a generic Z press.
     if (state->myFight == 3) {
         float firstY = borderTop + 92.0f;
-        if (!N3DSBattleMenu_pointInRows(state, gameX, gameY, firstY, 1)) return false;
+        if (!N3DSBattleMenu_pointInRows(state, gameX, gameY, firstY, 1)) {
+            return N3DS_BATTLE_MENU_TOUCH_CONSUMED;
+        }
         float splitX = borderLeft + 158.0f;
         controller->active = true;
         controller->kind = N3DS_BATTLE_MENU_TARGET_SPECIAL;
         controller->targetIndex = gameX < splitX ? 0 : 1;
-        return true;
+        return N3DS_BATTLE_MENU_TOUCH_ACTION;
     }
 
-    if (state->myFight != 0 || state->mnFight != 0) return false;
+    // Attack timing, dialogue/turn transitions, and other non-menu phases
+    // keep the existing generic tap semantics.
+    if (state->myFight != 0 || state->mnFight != 0) {
+        return N3DS_BATTLE_MENU_TOUCH_PASS_THROUGH;
+    }
 
     int32_t modeCode = N3DSBattleMenu_modeCode(state->menuNo);
+    bool menuActive =
+        modeCode == 0 ||
+        modeCode == 2 ||
+        modeCode == 4 ||
+        modeCode == 6 ||
+        modeCode == 7 ||
+        modeCode == 8 ||
+        modeCode == 20 ||
+        modeCode == 22;
+    if (!menuActive) return N3DS_BATTLE_MENU_TOUCH_PASS_THROUGH;
+
     controller->modeCode = modeCode;
+
+    // Inside a submenu, tapping one of the four persistent battle buttons is
+    // UNDERTALE's normal cancel action. Use X/SHIFT rather than rewriting
+    // bmenuno so nested 10->2 and 11->3 behavior remains game-owned.
+    if (modeCode != 0) {
+        repeat(4, i) {
+            if (N3DSBattleMenu_pointInRect(gameX, gameY, &state->topButtons[i])) {
+                return N3DS_BATTLE_MENU_TOUCH_CANCEL;
+            }
+        }
+    }
 
     if (modeCode == 0) {
         repeat(4, i) {
@@ -186,61 +225,74 @@ static bool N3DSBattleMenuTouchController_capture(
             controller->active = true;
             controller->kind = N3DS_BATTLE_MENU_TARGET_TOP;
             controller->targetIndex = i;
-            return true;
+            return N3DS_BATTLE_MENU_TOUCH_ACTION;
         }
-        return false;
+        return N3DS_BATTLE_MENU_TOUCH_CONSUMED;
     }
 
     if (modeCode == 2 || modeCode == 4 || modeCode == 22) {
         float firstY = borderTop + 28.0f;
-        if (!N3DSBattleMenu_pointInRows(state, gameX, gameY, firstY, 3)) return false;
+        if (!N3DSBattleMenu_pointInRows(state, gameX, gameY, firstY, 3)) {
+            return N3DS_BATTLE_MENU_TOUCH_CONSUMED;
+        }
         int32_t row = N3DSBattleMenu_nearestRow(gameY, firstY, 3);
-        if (row < 0 || row >= 3 || state->monsterPresent[row] == 0) return true;
+        if (row < 0 || row >= 3 || state->monsterPresent[row] == 0) {
+            return N3DS_BATTLE_MENU_TOUCH_CONSUMED;
+        }
         controller->active = true;
         controller->kind = N3DS_BATTLE_MENU_TARGET_MONSTER;
         controller->targetIndex = row;
-        return true;
+        return N3DS_BATTLE_MENU_TOUCH_ACTION;
     }
 
     if (modeCode == 20) {
         float firstY = borderTop + 28.0f;
-        if (!N3DSBattleMenu_pointInRows(state, gameX, gameY, firstY, 3)) return false;
+        if (!N3DSBattleMenu_pointInRows(state, gameX, gameY, firstY, 3)) {
+            return N3DS_BATTLE_MENU_TOUCH_CONSUMED;
+        }
         int32_t row = N3DSBattleMenu_nearestRow(gameY, firstY, 3);
         int32_t col = gameX < borderLeft + 162.0f ? 0 : 1;
         int32_t index = col * 3 + row;
-        if (index < 0 || index >= 6 || state->choicePresent[index] == 0) return true;
+        if (index < 0 || index >= 6 || state->choicePresent[index] == 0) {
+            return N3DS_BATTLE_MENU_TOUCH_CONSUMED;
+        }
         controller->active = true;
         controller->kind = N3DS_BATTLE_MENU_TARGET_ACT;
         controller->targetIndex = index;
-        return true;
+        return N3DS_BATTLE_MENU_TOUCH_ACTION;
     }
 
     if (modeCode == 6 || modeCode == 7) {
         float firstY = borderTop + 28.0f;
-        if (!N3DSBattleMenu_pointInRows(state, gameX, gameY, firstY, 2)) return false;
+        if (!N3DSBattleMenu_pointInRows(state, gameX, gameY, firstY, 2)) {
+            return N3DS_BATTLE_MENU_TOUCH_CONSUMED;
+        }
         int32_t row = N3DSBattleMenu_nearestRow(gameY, firstY, 2);
         int32_t col = gameX < borderLeft + 156.0f ? 0 : 1;
         int32_t index = row * 2 + col;
         int32_t pageOffset = modeCode == 7 ? 4 : 0;
-        if (index < 0 || index >= 4 || state->itemPresent[pageOffset + index] == 0) return true;
+        if (index < 0 || index >= 4 || state->itemPresent[pageOffset + index] == 0) {
+            return N3DS_BATTLE_MENU_TOUCH_CONSUMED;
+        }
         controller->active = true;
         controller->kind = N3DS_BATTLE_MENU_TARGET_ITEM;
         controller->targetIndex = index;
-        return true;
+        return N3DS_BATTLE_MENU_TOUCH_ACTION;
     }
 
     if (modeCode == 8) {
         float firstY = borderTop + 28.0f;
-        if (!N3DSBattleMenu_pointInRows(state, gameX, gameY, firstY, 2)) return false;
+        if (!N3DSBattleMenu_pointInRows(state, gameX, gameY, firstY, 2)) {
+            return N3DS_BATTLE_MENU_TOUCH_CONSUMED;
+        }
         controller->active = true;
         controller->kind = N3DS_BATTLE_MENU_TARGET_MERCY;
         controller->targetIndex = N3DSBattleMenu_nearestRow(gameY, firstY, 2);
-        return true;
+        return N3DS_BATTLE_MENU_TOUCH_ACTION;
     }
 
-    return false;
+    return N3DS_BATTLE_MENU_TOUCH_CONSUMED;
 }
-
 static void N3DSBattleMenuTouchController_step(
     N3DSBattleMenuTouchController* controller,
     Runner* runner,
@@ -1522,6 +1574,7 @@ int main(int argc, char** argv) {
         bool menuUp = false;
         bool menuDown = false;
         bool menuConfirm = false;
+        bool menuCancel = false;
 
         if (inputProfile.battleMenuTouchEnabled && touchTap) {
             N3DSBattleMenuState menuState;
@@ -1534,15 +1587,21 @@ int main(int argc, char** argv) {
                     (float) touchState.current.py,
                     &menuTouchX,
                     &menuTouchY
-                ) &&
-                N3DSBattleMenuTouchController_capture(
-                    &battleMenuTouchController,
-                    &menuState,
-                    menuTouchX,
-                    menuTouchY
                 )) {
-                touchTap = false;
-                touchState.tapPulseFrames = 0u;
+                N3DSBattleMenuTouchResult menuTouchResult =
+                    N3DSBattleMenuTouchController_capture(
+                        &battleMenuTouchController,
+                        &menuState,
+                        menuTouchX,
+                        menuTouchY
+                    );
+                if (menuTouchResult != N3DS_BATTLE_MENU_TOUCH_PASS_THROUGH) {
+                    touchTap = false;
+                    touchState.tapPulseFrames = 0u;
+                }
+                if (menuTouchResult == N3DS_BATTLE_MENU_TOUCH_CANCEL) {
+                    menuCancel = true;
+                }
             }
         }
 
@@ -1575,7 +1634,7 @@ int main(int argc, char** argv) {
         bool upInput = (held & KEY_UP) || circle.dy > 80 || touchUp;
         bool downInput = (held & KEY_DOWN) || circle.dy < -80 || touchDown;
         bool aInput = (held & KEY_A) || menuConfirm || (touchTap && inputProfile.tapKeyCode == 'Z');
-        bool bInput = (held & KEY_B) || (touchTap && inputProfile.tapKeyCode == 'X');
+        bool bInput = (held & KEY_B) || menuCancel || (touchTap && inputProfile.tapKeyCode == 'X');
         bool cInput = (held & KEY_Y) || (held & KEY_X) || (touchTap && inputProfile.tapKeyCode == 'C');
 
         if (touchTap && inputProfile.tapKeyCode == VK_LEFT) leftInput = true;
