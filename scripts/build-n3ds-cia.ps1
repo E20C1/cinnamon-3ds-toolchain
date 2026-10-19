@@ -65,6 +65,48 @@ function Resolve-DataWinPath {
     return (Resolve-Path -LiteralPath $resolved).Path
 }
 
+function Get-ExternalAudioFingerprint {
+    param([string]$DataWinPath)
+
+    $root = Split-Path -Parent $DataWinPath
+    $audioExtensions = @(".ogg", ".oga", ".wav")
+    $files = @(
+        Get-ChildItem -LiteralPath $root -Recurse -File -ErrorAction SilentlyContinue |
+            Where-Object { $audioExtensions -contains $_.Extension.ToLowerInvariant() } |
+            Sort-Object FullName
+    )
+
+    $builder = New-Object System.Text.StringBuilder
+    [int64]$totalBytes = 0
+    foreach ($file in $files) {
+        $relative = $file.FullName.Substring($root.Length).TrimStart([char[]]@('\\', '/')).Replace('\\', '/')
+        $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName).Hash.ToLowerInvariant()
+        [void]$builder.Append($relative)
+        [void]$builder.Append('|')
+        [void]$builder.Append([string]$file.Length)
+        [void]$builder.Append('|')
+        [void]$builder.Append($hash)
+        [void]$builder.Append([Environment]::NewLine)
+        $totalBytes += [int64]$file.Length
+    }
+
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($builder.ToString())
+        $digest = $sha.ComputeHash($bytes)
+        $fingerprint = ([System.BitConverter]::ToString($digest)).Replace('-', '').ToLowerInvariant()
+    }
+    finally {
+        $sha.Dispose()
+    }
+
+    return [ordered]@{
+        file_count = $files.Count
+        total_bytes = $totalBytes
+        sha256 = $fingerprint
+    }
+}
+
 function Resolve-Executable {
     param(
         [string]$ExplicitPath,
@@ -355,7 +397,36 @@ if ($needsPreprocessorBuild) {
     }
 }
 
-if (-not $SkipPreprocess) {
+$effectiveSkipPreprocess = [bool]$SkipPreprocess
+if ($effectiveSkipPreprocess) {
+    $sourceManifestPath = Join-Path $assetPath "n3ds_source_manifest.json"
+    $sourceIsCurrent = $false
+    if (Test-Path -LiteralPath $sourceManifestPath -PathType Leaf) {
+        try {
+            $sourceManifest = Get-Content -LiteralPath $sourceManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            $currentDataWinHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $dataWinPath).Hash.ToLowerInvariant()
+            $currentExternalAudio = Get-ExternalAudioFingerprint -DataWinPath $dataWinPath
+            $manifestAudio = $sourceManifest.external_audio
+            $sourceIsCurrent =
+                ([string]$sourceManifest.data_win_sha256).ToLowerInvariant() -eq $currentDataWinHash -and
+                $null -ne $manifestAudio -and
+                ([int]$manifestAudio.file_count) -eq ([int]$currentExternalAudio.file_count) -and
+                ([int64]$manifestAudio.total_bytes) -eq ([int64]$currentExternalAudio.total_bytes) -and
+                ([string]$manifestAudio.sha256).ToLowerInvariant() -eq ([string]$currentExternalAudio.sha256).ToLowerInvariant()
+        }
+        catch {
+            $sourceIsCurrent = $false
+        }
+    }
+
+    if (-not $sourceIsCurrent) {
+        Write-Host ""
+        Write-Host "External audio/data.win changed since the last preprocess; refreshing 3DS assets despite -SkipPreprocess." -ForegroundColor Yellow
+        $effectiveSkipPreprocess = $false
+    }
+}
+
+if (-not $effectiveSkipPreprocess) {
     # CIA builds use a private generated-asset tree by default so switching
     # between GameMaker titles cannot carry stale BCWAV/texture files forward.
     if ($usingPrivateAssetDir -and (Test-Path -LiteralPath $assetPath)) {
@@ -363,7 +434,7 @@ if (-not $SkipPreprocess) {
     }
 
     Write-Host ""
-    Write-Host "Preprocessing local data.win for Nintendo 3DS..."
+    Write-Host "Preprocessing local data.win and sibling audio for Nintendo 3DS..."
     $preprocessArgs = @{
         DataWin = $dataWinPath
         OutputDir = $assetPath
@@ -497,7 +568,7 @@ try {
     New-Item -ItemType Directory -Force -Path $romfsPath | Out-Null
 
     foreach ($item in Get-ChildItem -LiteralPath $assetPath -Force) {
-        if ($item.Name -ieq "game_metadata.json" -or $item.Name -ieq "data.win") { continue }
+        if ($item.Name -ieq "game_metadata.json" -or $item.Name -ieq "data.win" -or $item.Name -ieq "n3ds_source_manifest.json") { continue }
         Copy-Item -LiteralPath $item.FullName -Destination $romfsPath -Recurse -Force
     }
     Copy-Item -LiteralPath $dataWinPath -Destination (Join-Path $romfsPath "data.win") -Force
