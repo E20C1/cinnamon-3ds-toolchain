@@ -31,6 +31,48 @@ function Resolve-LocalPath {
     return (Join-Path $Base $Path)
 }
 
+function Get-ExternalAudioFingerprint {
+    param([string]$DataWinPath)
+
+    $root = Split-Path -Parent $DataWinPath
+    $audioExtensions = @(".ogg", ".oga", ".wav")
+    $files = @(
+        Get-ChildItem -LiteralPath $root -Recurse -File -ErrorAction SilentlyContinue |
+            Where-Object { $audioExtensions -contains $_.Extension.ToLowerInvariant() } |
+            Sort-Object FullName
+    )
+
+    $builder = New-Object System.Text.StringBuilder
+    [int64]$totalBytes = 0
+    foreach ($file in $files) {
+        $relative = $file.FullName.Substring($root.Length).TrimStart([char[]]@('\\', '/')).Replace('\\', '/')
+        $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName).Hash.ToLowerInvariant()
+        [void]$builder.Append($relative)
+        [void]$builder.Append('|')
+        [void]$builder.Append([string]$file.Length)
+        [void]$builder.Append('|')
+        [void]$builder.Append($hash)
+        [void]$builder.Append([Environment]::NewLine)
+        $totalBytes += [int64]$file.Length
+    }
+
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($builder.ToString())
+        $digest = $sha.ComputeHash($bytes)
+        $fingerprint = ([System.BitConverter]::ToString($digest)).Replace('-', '').ToLowerInvariant()
+    }
+    finally {
+        $sha.Dispose()
+    }
+
+    return [ordered]@{
+        file_count = $files.Count
+        total_bytes = $totalBytes
+        sha256 = $fingerprint
+    }
+}
+
 function Resolve-Executable {
     param(
         [string]$ExplicitPath,
@@ -167,6 +209,7 @@ if ($git) {
 }
 
 $inputHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $dataWinPath).Hash.ToLowerInvariant()
+$externalAudioFingerprint = Get-ExternalAudioFingerprint -DataWinPath $dataWinPath
 $preprocessorHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $preprocessorPath).Hash.ToLowerInvariant()
 
 $outputHashes = [ordered]@{}
@@ -182,6 +225,7 @@ $manifestPath = Join-Path $manifestDir "last-preprocess.json"
 $manifest = [ordered]@{
     repository_commit = $gitCommit
     input_sha256 = $inputHash
+    external_audio = $externalAudioFingerprint
     preprocessor_sha256 = $preprocessorHash
     atlas_page_mode = $AtlasPageMode
     texture_format = $TextureFormat
@@ -190,7 +234,17 @@ $manifest = [ordered]@{
 }
 $manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
 
+$sourceManifestPath = Join-Path $outputPath "n3ds_source_manifest.json"
+$sourceManifest = [ordered]@{
+    schema_version = 1
+    data_win_sha256 = $inputHash
+    external_audio = $externalAudioFingerprint
+    generated_utc = [DateTime]::UtcNow.ToString("o")
+}
+$sourceManifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $sourceManifestPath -Encoding UTF8
+
 Write-Host ""
 Write-Host "Preprocessing completed." -ForegroundColor Green
 Write-Host "Output:   $outputPath"
 Write-Host "Manifest: $manifestPath"
+Write-Host "Audio files: $($externalAudioFingerprint.file_count) ($($externalAudioFingerprint.total_bytes) bytes)"
