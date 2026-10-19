@@ -2850,7 +2850,7 @@ static void N3DSAudio_init(AudioSystem* base, DataWin* dataWin, FileSystem* file
         snprintf(
             audio->startupError,
             sizeof(audio->startupError),
-            "DSP audio init failed (0x%08lX). Embed your own dspfirm.cdc when building the CIA, or dump it to /3ds/dspfirm.cdc with Luma3DS.",
+            "DSP init failed 0x%08lX. Rebuild CIA with -DspFirm, or dump /3ds/dspfirm.cdc. Press START.",
             (unsigned long) ndspResult
         );
         N3DSDebugLog_event("audio_fail", "ndspInit failed rc=0x%08lX", (unsigned long) ndspResult);
