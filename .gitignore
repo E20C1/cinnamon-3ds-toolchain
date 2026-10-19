@@ -11,6 +11,7 @@ resources/3ds/romfs/*.bcwav
 
 # Proprietary/local GameMaker inputs and generated packages
 **/data.win
+**/dspfirm.cdc
 *.cia
 *.3dsx
 *.elf
