@@ -516,6 +516,8 @@ try {
         $battleFollowActiveSelfVar = [string](Get-OptionalProperty -Object $inputPreset -Name "battle_follow_active_self_var" -Fallback "")
         $battleFollowActiveGreaterThan = [int](Get-OptionalProperty -Object $inputPreset -Name "battle_follow_active_greater_than" -Fallback 0)
         $battleFollowTolerance = [int](Get-OptionalProperty -Object $inputPreset -Name "battle_follow_tolerance" -Fallback 4)
+        $battleFollowActivationMs = [int](Get-OptionalProperty -Object $inputPreset -Name "battle_follow_activation_ms" -Fallback 50)
+        $battleFollowStepHint = [int](Get-OptionalProperty -Object $inputPreset -Name "battle_follow_step_hint" -Fallback 4)
         $inputProfilePath = Join-Path $romfsPath "cinnamon_input_profile.cfg"
         @(
             "schema=1",
@@ -529,7 +531,9 @@ try {
             "battle_follow_target_object_index=$battleFollowTargetObjectIndex",
             "battle_follow_active_self_var=$battleFollowActiveSelfVar",
             "battle_follow_active_greater_than=$battleFollowActiveGreaterThan",
-            "battle_follow_tolerance=$battleFollowTolerance"
+            "battle_follow_tolerance=$battleFollowTolerance",
+            "battle_follow_activation_ms=$battleFollowActivationMs",
+            "battle_follow_step_hint=$battleFollowStepHint"
         ) | Set-Content -LiteralPath $inputProfilePath -Encoding ASCII
     }
 
