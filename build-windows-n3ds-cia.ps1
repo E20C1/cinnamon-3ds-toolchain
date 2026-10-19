@@ -28,6 +28,7 @@ param(
     [switch]$SkipPreprocessorBuild,
     [switch]$SkipPreprocess,
     [switch]$KeepStaging,
+    [switch]$NoToolDownload,
     [switch]$NoPause
 )
 
@@ -57,6 +58,7 @@ try {
         SkipPreprocessorBuild = $SkipPreprocessorBuild
         SkipPreprocess = $SkipPreprocess
         KeepStaging = $KeepStaging
+        NoToolDownload = $NoToolDownload
     }
 
     & $scriptPath @argsMap
