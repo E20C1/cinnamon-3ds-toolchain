@@ -1,4 +1,5 @@
 #include "../data_win.h"
+#include "../instance.h"
 #include "../runner.h"
 #include "../runner_keyboard.h"
 #include "../utils.h"
@@ -7,6 +8,7 @@
 #include "n3ds_audio_system.h"
 #include "n3ds_file_system.h"
 #include "n3ds_renderer.h"
+#include "n3ds_touch_profile.h"
 
 #include <3ds.h>
 #include <citro2d.h>
@@ -38,6 +40,16 @@ typedef struct {
 
 static char gN3DSBootLogLines[N3DS_BOOT_LOG_MAX_LINES][N3DS_BOOT_LOG_LINE_CHARS];
 static int gN3DSBootLogLineCount = 0;
+
+typedef struct {
+    bool active;
+    bool movementCommitted;
+    touchPosition start;
+    touchPosition current;
+    u64 startMs;
+    float maxMoveSquared;
+    uint8_t tapPulseFrames;
+} N3DSTouchState;
 
 typedef struct {
     C2D_TextBuf textBuf;
@@ -469,6 +481,97 @@ static void syncKey(RunnerKeyboardState* keyboard, bool* state, int32_t key, boo
     *state = held;
 }
 
+static bool N3DS_touchFollowModeActive(Runner* runner, const N3DSTouchProfile* profile) {
+    if (runner == NULL || profile == NULL || !profile->followEnabled) return false;
+    if (profile->followTargetToken[0] == '\0') return false;
+    if (profile->followConditionGlobal[0] == '\0') return true;
+
+    double value = Runner_get3DSGlobalRealByName(
+        runner,
+        profile->followConditionGlobal,
+        profile->followConditionGreaterThan
+    );
+    return value > (double) profile->followConditionGreaterThan;
+}
+
+static void N3DS_touchPointToWorld(
+    Runner* runner,
+    int32_t gameW,
+    int32_t gameH,
+    const touchPosition* touch,
+    float* outX,
+    float* outY
+) {
+    if (outX == NULL || outY == NULL || touch == NULL) return;
+    if (gameW <= 0) gameW = 320;
+    if (gameH <= 0) gameH = 240;
+
+    float logicalX = ((float) touch->px / 320.0f) * (float) gameW;
+    float logicalY = ((float) touch->py / 240.0f) * (float) gameH;
+    *outX = logicalX;
+    *outY = logicalY;
+
+    if (runner == NULL || runner->currentRoom == NULL || (runner->currentRoom->flags & 1) == 0) return;
+
+    repeat(MAX_VIEWS, i) {
+        RuntimeView* view = &runner->views[i];
+        if (!view->enabled || view->portWidth <= 0 || view->portHeight <= 0) continue;
+        if (logicalX < (float) view->portX || logicalY < (float) view->portY ||
+            logicalX >= (float) (view->portX + view->portWidth) ||
+            logicalY >= (float) (view->portY + view->portHeight)) {
+            continue;
+        }
+
+        *outX = (float) view->viewX +
+            (logicalX - (float) view->portX) * ((float) view->viewWidth / (float) view->portWidth);
+        *outY = (float) view->viewY +
+            (logicalY - (float) view->portY) * ((float) view->viewHeight / (float) view->portHeight);
+        return;
+    }
+}
+
+static void N3DS_updateTouchGesture(
+    N3DSTouchState* state,
+    const N3DSTouchProfile* profile,
+    u32 held,
+    u32 down,
+    u32 up
+) {
+    if (state == NULL || profile == NULL || !profile->enabled) return;
+
+    u64 nowMs = osGetTime();
+    if (down & KEY_TOUCH) {
+        memset(state, 0, sizeof(*state));
+        state->active = true;
+        state->startMs = nowMs;
+        hidTouchRead(&state->start);
+        state->current = state->start;
+    }
+
+    if (state->active && (held & KEY_TOUCH)) {
+        hidTouchRead(&state->current);
+        float dx = (float) state->current.px - (float) state->start.px;
+        float dy = (float) state->current.py - (float) state->start.py;
+        float moveSquared = dx * dx + dy * dy;
+        if (moveSquared > state->maxMoveSquared) state->maxMoveSquared = moveSquared;
+
+        float tapMoveSquared = profile->tapMaxMovePx * profile->tapMaxMovePx;
+        if (state->maxMoveSquared > tapMoveSquared || nowMs - state->startMs > profile->tapMaxMs) {
+            state->movementCommitted = true;
+        }
+    }
+
+    if (state->active && (up & KEY_TOUCH)) {
+        u64 elapsedMs = nowMs - state->startMs;
+        float tapMoveSquared = profile->tapMaxMovePx * profile->tapMaxMovePx;
+        if (!state->movementCommitted && elapsedMs <= profile->tapMaxMs && state->maxMoveSquared <= tapMoveSquared) {
+            state->tapPulseFrames = 1u;
+        }
+        state->active = false;
+        state->movementCommitted = false;
+    }
+}
+
 static void N3DSLoadingScreen_free(N3DSLoadingScreen* screen) {
     if (screen == NULL) return;
     if (screen->textBuf != NULL) {
@@ -687,6 +790,10 @@ int main(int argc, char** argv) {
     mkdir("sdmc:/3ds", 0777);
     mkdir("sdmc:/3ds/cinnamon", 0777);
 
+    N3DSTouchProfile touchProfile;
+    N3DSTouchProfile_load(&touchProfile, "romfs:/cinnamon_game_profile.json");
+    N3DSTouchState touchState = {0};
+
     char* dataWinPath = chooseDataWinPath();
 
     N3DSLoadingScreen loadingScreen = {0};
@@ -809,6 +916,7 @@ int main(int argc, char** argv) {
     bool leftHeld = false, rightHeld = false, upHeld = false, downHeld = false;
     bool aHeld = false, bHeld = false, yHeld = false;
     bool lHeld = false, rHeld = false;
+    bool touchActionHeld = false;
 
     Gen8* gen8 = &dataWin->gen8;
     int32_t gameW = (int32_t) gen8->defaultWindowWidth;
@@ -821,6 +929,7 @@ int main(int argc, char** argv) {
         hidScanInput();
         u32 held = hidKeysHeld();
         u32 down = hidKeysDown();
+        u32 up = hidKeysUp();
 
         if (down & KEY_START) break;
         if (down & KEY_SELECT) debugMonitorVisible = !debugMonitorVisible;
@@ -830,17 +939,80 @@ int main(int argc, char** argv) {
             runner->pendingRoom = N3DS_DEBUG_ASRIEL_ROOM;
         }
 
+        N3DS_updateTouchGesture(&touchState, &touchProfile, held, down, up);
+
+        bool touchLeft = false;
+        bool touchRight = false;
+        bool touchUp = false;
+        bool touchDown = false;
+        if (touchProfile.enabled && touchState.active && touchState.movementCommitted) {
+            bool followMode = N3DS_touchFollowModeActive(runner, &touchProfile);
+            if (followMode) {
+                float targetX = 0.0f;
+                float targetY = 0.0f;
+                N3DS_touchPointToWorld(runner, gameW, gameH, &touchState.current, &targetX, &targetY);
+                Instance* targetInstance = Runner_find3DSActiveInstanceByTokenNear(
+                    runner,
+                    touchProfile.followTargetToken,
+                    targetX,
+                    targetY
+                );
+                if (targetInstance != NULL) {
+                    float tolerance = touchProfile.followTolerance;
+                    touchLeft = targetInstance->x > targetX + tolerance;
+                    touchRight = targetInstance->x < targetX - tolerance;
+                    touchUp = targetInstance->y > targetY + tolerance;
+                    touchDown = targetInstance->y < targetY - tolerance;
+                }
+            } else {
+                float dx = (float) touchState.current.px - (float) touchState.start.px;
+                float dy = (float) touchState.current.py - (float) touchState.start.py;
+                float deadzone = touchProfile.virtualStickDeadzonePx;
+                touchLeft = dx < -deadzone;
+                touchRight = dx > deadzone;
+                touchUp = dy < -deadzone;
+                touchDown = dy > deadzone;
+            }
+        }
+
+        bool touchTap = touchState.tapPulseFrames > 0u;
         circlePosition circle;
         hidCircleRead(&circle);
 
-        syncKey(runner->keyboard, &leftHeld, VK_LEFT, (held & KEY_LEFT) || circle.dx < -80);
-        syncKey(runner->keyboard, &rightHeld, VK_RIGHT, (held & KEY_RIGHT) || circle.dx > 80);
-        syncKey(runner->keyboard, &upHeld, VK_UP, (held & KEY_UP) || circle.dy > 80);
-        syncKey(runner->keyboard, &downHeld, VK_DOWN, (held & KEY_DOWN) || circle.dy < -80);
+        bool leftInput = (held & KEY_LEFT) || circle.dx < -80 || touchLeft;
+        bool rightInput = (held & KEY_RIGHT) || circle.dx > 80 || touchRight;
+        bool upInput = (held & KEY_UP) || circle.dy > 80 || touchUp;
+        bool downInput = (held & KEY_DOWN) || circle.dy < -80 || touchDown;
+        bool aInput = (held & KEY_A) != 0;
+        bool bInput = (held & KEY_B) != 0;
+        bool cInput = ((held & KEY_Y) || (held & KEY_X)) != 0;
 
-        syncKey(runner->keyboard, &aHeld, 'Z', (held & KEY_A));
-        syncKey(runner->keyboard, &bHeld, 'X', (held & KEY_B));
-        syncKey(runner->keyboard, &yHeld, 'C', (held & KEY_Y) || (held & KEY_X));
+        if (touchTap) {
+            if (touchProfile.tapKeyCode == VK_LEFT) leftInput = true;
+            else if (touchProfile.tapKeyCode == VK_RIGHT) rightInput = true;
+            else if (touchProfile.tapKeyCode == VK_UP) upInput = true;
+            else if (touchProfile.tapKeyCode == VK_DOWN) downInput = true;
+            else if (touchProfile.tapKeyCode == 'Z') aInput = true;
+            else if (touchProfile.tapKeyCode == 'X') bInput = true;
+            else if (touchProfile.tapKeyCode == 'C') cInput = true;
+        }
+
+        syncKey(runner->keyboard, &leftHeld, VK_LEFT, leftInput);
+        syncKey(runner->keyboard, &rightHeld, VK_RIGHT, rightInput);
+        syncKey(runner->keyboard, &upHeld, VK_UP, upInput);
+        syncKey(runner->keyboard, &downHeld, VK_DOWN, downInput);
+
+        syncKey(runner->keyboard, &aHeld, 'Z', aInput);
+        syncKey(runner->keyboard, &bHeld, 'X', bInput);
+        syncKey(runner->keyboard, &yHeld, 'C', cInput);
+        if (touchProfile.tapKeyCode != VK_LEFT && touchProfile.tapKeyCode != VK_RIGHT &&
+            touchProfile.tapKeyCode != VK_UP && touchProfile.tapKeyCode != VK_DOWN &&
+            touchProfile.tapKeyCode != 'Z' && touchProfile.tapKeyCode != 'X' &&
+            touchProfile.tapKeyCode != 'C') {
+            syncKey(runner->keyboard, &touchActionHeld, touchProfile.tapKeyCode, touchTap);
+        } else if (touchActionHeld) {
+            syncKey(runner->keyboard, &touchActionHeld, touchProfile.tapKeyCode, false);
+        }
         syncKey(runner->keyboard, &lHeld, VK_PAGEDOWN, (held & KEY_L) && !debugWarpToAsriel);
         syncKey(runner->keyboard, &rHeld, VK_PAGEUP, (held & KEY_R));
 
@@ -856,6 +1028,13 @@ int main(int argc, char** argv) {
         C3D_FrameBegin(0);
         renderer->vtable->beginFrame(renderer, gameW, gameH, 400, 240);
         Runner_drawViews(runner, gameW, gameH, displayScaleX, displayScaleY, false);
+        if (touchProfile.mirrorBottomScreen) {
+            runner->n3dsMirrorPass = true;
+            N3DSRenderer_beginBottomScreenMirror(renderer, gameW, gameH);
+            Runner_drawViews(runner, gameW, gameH, displayScaleX, displayScaleY, false);
+            N3DSRenderer_endBottomScreenMirror(renderer);
+            runner->n3dsMirrorPass = false;
+        }
         N3DSRenderer_beginOverlay(renderer);
         if (haveRoomBorder) C2D_DrawSprite(&roomBorder);
         else N3DS_drawFallbackRoomBorder();
@@ -867,6 +1046,7 @@ int main(int argc, char** argv) {
         N3DSDebugMonitor_tickFrame(&debugMonitor, (double) (osGetTime() - renderStartMs));
 
         RunnerKeyboard_beginFrame(runner->keyboard);
+        if (touchState.tapPulseFrames > 0u) touchState.tapPulseFrames--;
     }
 
     audioSystem->vtable->destroy(audioSystem);
