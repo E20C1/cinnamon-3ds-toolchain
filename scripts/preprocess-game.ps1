@@ -238,9 +238,10 @@ $manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $manifestPath -En
 
 $sourceManifestPath = Join-Path $outputPath "n3ds_source_manifest.json"
 $sourceManifest = [ordered]@{
-    schema_version = 1
+    schema_version = 2
     data_win_sha256 = $inputHash
     external_audio = $externalAudioFingerprint
+    preprocessor_sha256 = $preprocessorHash
     generated_utc = [DateTime]::UtcNow.ToString("o")
 }
 $sourceManifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $sourceManifestPath -Encoding UTF8
