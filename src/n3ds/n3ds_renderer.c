@@ -387,6 +387,7 @@ typedef struct N3DSRenderer {
     uint32_t baseTPAGCount;
     uint32_t dynamicCaptureTPAGCount;
     bool bottomScreenGuiActive;
+    bool bottomScreenMirrorActive;
     bool topScreenGuiActive;
     bool topScreenGui2xActive;
     bool topScreenBattleViewActive;
@@ -2104,7 +2105,7 @@ static void N3DSRenderer_applyTextureFilterForScale(N3DSRenderer* renderer, C3D_
         return;
     }
 
-    if (renderer != NULL && (renderer->bottomScreenGuiActive || renderer->topScreenGuiActive || renderer->topScreenBattleViewActive)) {
+    if (renderer != NULL && (renderer->bottomScreenGuiActive || renderer->bottomScreenMirrorActive || renderer->topScreenGuiActive || renderer->topScreenBattleViewActive)) {
         C3D_TexSetFilter(texture, GPU_NEAREST, GPU_NEAREST);
         return;
     }
@@ -3625,6 +3626,68 @@ void N3DSRenderer_beginOverlay(Renderer* base) {
     N3DSRenderer_sceneBeginTarget(renderer, N3DS_SCENE_TARGET_TOP, false);
 }
 
+void N3DSRenderer_beginBottomScreenMirror(Renderer* base, int32_t gameW, int32_t gameH) {
+#ifdef N3DS_DISABLE_BOTTOM_SCREEN
+    (void) base;
+    (void) gameW;
+    (void) gameH;
+    return;
+#endif
+    if (base == NULL) return;
+
+    N3DSRenderer* renderer = (N3DSRenderer*) base;
+    if (renderer->bottomTarget == NULL || renderer->bottomScreenGuiActive || renderer->bottomScreenMirrorActive) return;
+
+    renderer->savedFrameScaleX = renderer->frameScaleX;
+    renderer->savedFrameScaleY = renderer->frameScaleY;
+    renderer->savedFrameOffsetX = renderer->frameOffsetX;
+    renderer->savedFrameOffsetY = renderer->frameOffsetY;
+    renderer->savedPortOffsetX = renderer->portOffsetX;
+    renderer->savedPortOffsetY = renderer->portOffsetY;
+    renderer->savedViewX = renderer->viewX;
+    renderer->savedViewY = renderer->viewY;
+    renderer->savedViewScaleX = renderer->viewScaleX;
+    renderer->savedViewScaleY = renderer->viewScaleY;
+
+    N3DSRenderer_computeFrameLayoutForTarget(renderer, gameW, gameH, N3DS_BOTTOM_WIDTH, N3DS_BOTTOM_HEIGHT);
+    renderer->viewX = 0;
+    renderer->viewY = 0;
+    renderer->viewScaleX = renderer->frameScaleX;
+    renderer->viewScaleY = renderer->frameScaleY;
+    renderer->portOffsetX = 0.0f;
+    renderer->portOffsetY = 0.0f;
+    renderer->bottomScreenMirrorActive = true;
+
+    N3DSRenderer_flushC2DQueue(renderer);
+    N3DSRenderer_setDefaultGPUState(renderer);
+    N3DSRenderer_sceneBeginTarget(renderer, N3DS_SCENE_TARGET_BOTTOM, false);
+    C2D_TargetClear(renderer->bottomTarget, C2D_Color32(0, 0, 0, 255));
+}
+
+void N3DSRenderer_endBottomScreenMirror(Renderer* base) {
+    if (base == NULL) return;
+
+    N3DSRenderer* renderer = (N3DSRenderer*) base;
+    if (!renderer->bottomScreenMirrorActive) return;
+
+    renderer->frameScaleX = renderer->savedFrameScaleX;
+    renderer->frameScaleY = renderer->savedFrameScaleY;
+    renderer->frameOffsetX = renderer->savedFrameOffsetX;
+    renderer->frameOffsetY = renderer->savedFrameOffsetY;
+    renderer->portOffsetX = renderer->savedPortOffsetX;
+    renderer->portOffsetY = renderer->savedPortOffsetY;
+    renderer->viewX = renderer->savedViewX;
+    renderer->viewY = renderer->savedViewY;
+    renderer->viewScaleX = renderer->savedViewScaleX;
+    renderer->viewScaleY = renderer->savedViewScaleY;
+    renderer->bottomScreenMirrorActive = false;
+
+    N3DSRenderer_flushC2DQueue(renderer);
+    N3DSRenderer_applyBlendState(renderer);
+    N3DSRenderer_applyAlphaState(renderer);
+    N3DSRenderer_sceneBeginTarget(renderer, N3DS_SCENE_TARGET_TOP, false);
+}
+
 void N3DSRenderer_beginBottomScreenGUIEx(Renderer* base, int32_t guiW, int32_t guiH, float scaleX, float scaleY, float offsetX, float offsetY) {
 #ifdef N3DS_DISABLE_BOTTOM_SCREEN
     (void) base;
@@ -3639,7 +3702,7 @@ void N3DSRenderer_beginBottomScreenGUIEx(Renderer* base, int32_t guiW, int32_t g
     if (base == NULL) return;
 
     N3DSRenderer* renderer = (N3DSRenderer*) base;
-    if (renderer->bottomTarget == NULL || renderer->bottomScreenGuiActive) return;
+    if (renderer->bottomTarget == NULL || renderer->bottomScreenGuiActive || renderer->bottomScreenMirrorActive) return;
 
     renderer->savedFrameScaleX = renderer->frameScaleX;
     renderer->savedFrameScaleY = renderer->frameScaleY;
@@ -3706,7 +3769,7 @@ void N3DSRenderer_beginTopScreenGUI(Renderer* base, int32_t guiW, int32_t guiH) 
     if (base == NULL) return;
 
     N3DSRenderer* renderer = (N3DSRenderer*) base;
-    if (renderer->topScreenGuiActive || renderer->bottomScreenGuiActive) return;
+    if (renderer->topScreenGuiActive || renderer->bottomScreenGuiActive || renderer->bottomScreenMirrorActive) return;
 
     renderer->savedFrameScaleX = renderer->frameScaleX;
     renderer->savedFrameScaleY = renderer->frameScaleY;
@@ -3757,7 +3820,7 @@ void N3DSRenderer_beginTopScreenGUI2x(Renderer* base, int32_t guiW, int32_t guiH
     if (base == NULL) return;
 
     N3DSRenderer* renderer = (N3DSRenderer*) base;
-    if (renderer->topScreenGuiActive || renderer->bottomScreenGuiActive) return;
+    if (renderer->topScreenGuiActive || renderer->bottomScreenGuiActive || renderer->bottomScreenMirrorActive) return;
 
     renderer->savedFrameScaleX = renderer->frameScaleX;
     renderer->savedFrameScaleY = renderer->frameScaleY;
@@ -3829,7 +3892,11 @@ static void N3DSRenderer_beginView(Renderer* base, int32_t viewX, int32_t viewY,
     renderer->portOffsetY = (float) portY * renderer->frameScaleY;
     renderer->viewScaleX = viewW > 0 ? ((float) portW / (float) viewW) * renderer->frameScaleX : renderer->frameScaleX;
     renderer->viewScaleY = viewH > 0 ? ((float) portH / (float) viewH) * renderer->frameScaleY : renderer->frameScaleY;
-    N3DSRenderer_sceneBeginTarget(renderer, N3DS_SCENE_TARGET_TOP, false);
+    N3DSRenderer_sceneBeginTarget(
+        renderer,
+        renderer->bottomScreenMirrorActive ? N3DS_SCENE_TARGET_BOTTOM : N3DS_SCENE_TARGET_TOP,
+        false
+    );
 }
 
 static void N3DSRenderer_endView(MAYBE_UNUSED Renderer* base) {}
