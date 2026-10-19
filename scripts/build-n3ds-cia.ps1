@@ -586,6 +586,7 @@ try {
         $tapMaxMs = [int](Get-OptionalProperty -Object $inputPreset -Name "tap_max_ms" -Fallback 180)
         $tapMaxMovePx = [int](Get-OptionalProperty -Object $inputPreset -Name "tap_max_move_px" -Fallback 10)
         $dragDeadzonePx = [int](Get-OptionalProperty -Object $inputPreset -Name "drag_deadzone_px" -Fallback 18)
+        $battleMenuTouchEnabled = [bool](Get-OptionalProperty -Object $inputPreset -Name "battle_menu_touch_enabled" -Fallback $false)
         $battleFollowEnabled = [bool](Get-OptionalProperty -Object $inputPreset -Name "battle_follow_enabled" -Fallback $false)
         $battleFollowTargetToken = [string](Get-OptionalProperty -Object $inputPreset -Name "battle_follow_target_token" -Fallback "")
         $battleFollowTargetObjectIndex = [int](Get-OptionalProperty -Object $inputPreset -Name "battle_follow_target_object_index" -Fallback -1)
@@ -602,6 +603,7 @@ try {
             "tap_max_ms=$tapMaxMs",
             "tap_max_move_px=$tapMaxMovePx",
             "drag_deadzone_px=$dragDeadzonePx",
+            "battle_menu_touch_enabled=$(if ($battleMenuTouchEnabled) { 1 } else { 0 })",
             "battle_follow_enabled=$(if ($battleFollowEnabled) { 1 } else { 0 })",
             "battle_follow_target_token=$battleFollowTargetToken",
             "battle_follow_target_object_index=$battleFollowTargetObjectIndex",

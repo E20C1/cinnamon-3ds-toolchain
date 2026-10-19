@@ -531,6 +531,113 @@ static bool Runner_is3DSUndyneBattle(Runner* runner) {
     return false;
 }
 
+static bool Runner_fill3DSBattleMenuButtonRect(
+    Runner* runner,
+    const char* objectName,
+    N3DSBattleMenuButtonRect* outRect
+) {
+    if (outRect == NULL) return false;
+    memset(outRect, 0, sizeof(*outRect));
+    if (runner == NULL || runner->dataWin == NULL || runner->instances == NULL || objectName == NULL) return false;
+
+    int32_t instanceCount = (int32_t) arrlen(runner->instances);
+    repeat(instanceCount, i) {
+        Instance* inst = runner->instances[i];
+        if (inst == NULL || inst->destroyed || !inst->active || !inst->visible) continue;
+        if (!Runner_objectMatches3DSNameInHierarchy(runner, inst->objectIndex, objectName)) continue;
+        if (inst->spriteIndex < 0 || (uint32_t) inst->spriteIndex >= runner->dataWin->sprt.count) continue;
+
+        Sprite* sprite = &runner->dataWin->sprt.sprites[inst->spriteIndex];
+        float x1 = inst->x - (float) sprite->originX * inst->imageXscale;
+        float y1 = inst->y - (float) sprite->originY * inst->imageYscale;
+        float x2 = x1 + (float) sprite->width * inst->imageXscale;
+        float y2 = y1 + (float) sprite->height * inst->imageYscale;
+
+        outRect->present = true;
+        outRect->left = fminf(x1, x2);
+        outRect->right = fmaxf(x1, x2);
+        outRect->top = fminf(y1, y2);
+        outRect->bottom = fmaxf(y1, y2);
+        return true;
+    }
+
+    return false;
+}
+
+bool Runner_get3DSBattleMenuState(Runner* runner, N3DSBattleMenuState* outState) {
+    if (outState == NULL) return false;
+    memset(outState, 0, sizeof(*outState));
+    if (runner == NULL || runner->dataWin == NULL || runner->vmContext == NULL) return false;
+
+    Runner_prepare3DSDrawBattleState(runner);
+    if (!runner->n3dsDrawBattleActive) return false;
+
+    outState->battleActive = true;
+    outState->dodgingBullets = runner->n3dsDrawDodgingBullets;
+    outState->menuNo = (float) Runner_get3DSGlobalReal(runner, "bmenuno");
+    outState->myFight = (int32_t) Runner_get3DSGlobalReal(runner, "myfight");
+    outState->mnFight = (int32_t) Runner_get3DSGlobalReal(runner, "mnfight");
+    outState->mercy = (int32_t) Runner_get3DSGlobalReal(runner, "mercy");
+
+    repeat(7, i) {
+        outState->menuCoord[i] = (int32_t) Runner_get3DSGlobalArrayReal(runner, "bmenucoord", i);
+    }
+    repeat(3, i) {
+        outState->monsterPresent[i] = (int32_t) Runner_get3DSGlobalArrayReal(runner, "monster", i);
+    }
+    repeat(6, i) {
+        outState->choicePresent[i] = (int32_t) Runner_get3DSGlobalArrayReal(runner, "choices", i);
+    }
+    repeat(8, i) {
+        outState->itemPresent[i] = (int32_t) Runner_get3DSGlobalArrayReal(runner, "item", i);
+    }
+    repeat(4, i) {
+        outState->idealBorder[i] = (float) Runner_get3DSGlobalArrayReal(runner, "idealborder", i);
+    }
+
+    static const char* topButtonNames[4] = {
+        "obj_fightbt",
+        "obj_talkbt",
+        "obj_itembt",
+        "obj_sparebt",
+    };
+    repeat(4, i) {
+        Runner_fill3DSBattleMenuButtonRect(runner, topButtonNames[i], &outState->topButtons[i]);
+    }
+
+    return true;
+}
+
+bool Runner_map3DSBottomBattleUITouch(
+    Runner* runner,
+    float touchX,
+    float touchY,
+    float* outGameX,
+    float* outGameY
+) {
+    if (runner == NULL || runner->dataWin == NULL || outGameX == NULL || outGameY == NULL) return false;
+
+    int32_t guiW = runner->guiWidth > 0 ? runner->guiWidth : (int32_t) runner->dataWin->gen8.defaultWindowWidth;
+    int32_t guiH = runner->guiHeight > 0 ? runner->guiHeight : (int32_t) runner->dataWin->gen8.defaultWindowHeight;
+    if (guiW <= 0) guiW = 640;
+    if (guiH <= 0) guiH = 480;
+
+    float sx = 320.0f / (float) guiW;
+    float sy = 240.0f / (float) guiH;
+    float frameScale = sx < sy ? sx : sy;
+    if (frameScale <= 0.0f) return false;
+
+    float frameOffsetX = (320.0f - (float) guiW * frameScale) * 0.5f;
+    float frameOffsetY = (240.0f - (float) guiH * frameScale) * 0.5f;
+    float frameRight = frameOffsetX + (float) guiW * frameScale;
+    float frameBottom = frameOffsetY + (float) guiH * frameScale;
+    if (touchX < frameOffsetX || touchY < frameOffsetY || touchX >= frameRight || touchY >= frameBottom) return false;
+
+    *outGameX = (touchX - frameOffsetX) / frameScale;
+    *outGameY = (touchY - frameOffsetY) / frameScale;
+    return true;
+}
+
 N3DSBattleTouchStatus Runner_get3DSBattleTouchTarget(
     Runner* runner,
     const char* targetToken,

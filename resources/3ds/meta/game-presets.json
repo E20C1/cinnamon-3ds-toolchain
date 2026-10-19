@@ -22,6 +22,7 @@
         "tap_max_ms": 180,
         "tap_max_move_px": 10,
         "drag_deadzone_px": 18,
+        "battle_menu_touch_enabled": true,
         "battle_follow_enabled": true,
         "battle_follow_target_token": "obj_heart",
         "battle_follow_target_object_index": 743,

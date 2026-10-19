@@ -549,6 +549,38 @@ void Runner_drawTileLayer(Runner* runner, uint32_t layerIndex, RoomLayerTilesDat
 void Runner_freeRuntimeLayer(RuntimeLayer* runtimeLayer);
 RunnerTelemetry Runner_collectTelemetry(Runner* runner);
 #ifdef __3DS__
+typedef struct {
+    bool present;
+    float left;
+    float top;
+    float right;
+    float bottom;
+} N3DSBattleMenuButtonRect;
+
+typedef struct {
+    bool battleActive;
+    bool dodgingBullets;
+    float menuNo;
+    int32_t menuCoord[7];
+    int32_t myFight;
+    int32_t mnFight;
+    int32_t mercy;
+    int32_t monsterPresent[3];
+    int32_t choicePresent[6];
+    int32_t itemPresent[8];
+    float idealBorder[4];
+    N3DSBattleMenuButtonRect topButtons[4];
+} N3DSBattleMenuState;
+
+bool Runner_get3DSBattleMenuState(Runner* runner, N3DSBattleMenuState* outState);
+bool Runner_map3DSBottomBattleUITouch(
+    Runner* runner,
+    float touchX,
+    float touchY,
+    float* outGameX,
+    float* outGameY
+);
+
 typedef enum {
     N3DS_BATTLE_TOUCH_NOT_ACTIVE = 0,
     N3DS_BATTLE_TOUCH_TARGET_NOT_FOUND = 1,
