@@ -531,29 +531,82 @@ static bool Runner_is3DSUndyneBattle(Runner* runner) {
     return false;
 }
 
-bool Runner_get3DSBattleTouchTarget(
+N3DSBattleTouchStatus Runner_get3DSBattleTouchTarget(
     Runner* runner,
     const char* targetToken,
+    int32_t targetObjectIndex,
+    const char* activeSelfVar,
+    float activeGreaterThan,
     float touchX,
     float touchY,
+    float* outActivity,
     float* outCurrentX,
     float* outCurrentY,
     float* outTargetX,
     float* outTargetY
 ) {
-    if (runner == NULL || runner->dataWin == NULL || targetToken == NULL || targetToken[0] == '\0') return false;
-    if (outCurrentX == NULL || outCurrentY == NULL || outTargetX == NULL || outTargetY == NULL) return false;
+    if (outActivity != NULL) *outActivity = 0.0f;
+    if (outCurrentX != NULL) *outCurrentX = 0.0f;
+    if (outCurrentY != NULL) *outCurrentY = 0.0f;
+    if (outTargetX != NULL) *outTargetX = 0.0f;
+    if (outTargetY != NULL) *outTargetY = 0.0f;
 
-    // UNDERTALE's playable battle soul enables movement when global.mnfight == 2.
-    // Do not gate touch-follow on turntimer: some encounters keep the soul movable
-    // while turntimer is zero or otherwise unsuitable as an input-state signal.
-    if ((int32_t) Runner_get3DSGlobalReal(runner, "mnfight") != 2) {
-        runner->n3dsDrawBattleStateValid = false;
-        return false;
+    if (runner == NULL || runner->dataWin == NULL || targetToken == NULL || targetToken[0] == '\0') {
+        return N3DS_BATTLE_TOUCH_NOT_ACTIVE;
+    }
+    if (outCurrentX == NULL || outCurrentY == NULL || outTargetX == NULL || outTargetY == NULL) {
+        return N3DS_BATTLE_TOUCH_NOT_ACTIVE;
     }
 
-    Runner_prepare3DSDrawBattleState(runner);
+    const char* looseToken = targetToken;
+    if (strncmp(looseToken, "obj_", 4) == 0 && looseToken[4] != '\0') looseToken += 4;
 
+    Instance* best = NULL;
+    int32_t bestScore = INT32_MIN;
+    float bestActivity = 0.0f;
+    int32_t instanceCount = (int32_t) arrlen(runner->instances);
+    repeat(instanceCount, i) {
+        Instance* inst = runner->instances[i];
+        if (inst == NULL || inst->destroyed || !inst->active || !inst->visible) continue;
+
+        int32_t score = INT32_MIN;
+        if (targetObjectIndex >= 0 && inst->objectIndex == targetObjectIndex) score = 1000;
+        if (Runner_objectMatches3DSNameInHierarchy(runner, inst->objectIndex, targetToken)) {
+            if (score < 900) score = 900;
+        } else if (Runner_objectContains3DSTokenInHierarchy(runner, inst->objectIndex, looseToken)) {
+            if (score < 500) score = 500;
+        }
+
+        if (inst->spriteIndex >= 0 && (uint32_t) inst->spriteIndex < runner->dataWin->sprt.count) {
+            const char* spriteName = runner->dataWin->sprt.sprites[inst->spriteIndex].name;
+            if (Runner_stringContainsToken(spriteName, looseToken) && score < 300) score = 300;
+        }
+        if (score == INT32_MIN) continue;
+
+        float activity = 1.0f;
+        if (activeSelfVar != NULL && activeSelfVar[0] != '\0') {
+            activity = (float) Runner_get3DSInstanceRealVar(runner, inst, activeSelfVar);
+            if (activity > activeGreaterThan) score += 2000;
+        }
+
+        if (best == NULL || score > bestScore) {
+            best = inst;
+            bestScore = score;
+            bestActivity = activity;
+        }
+    }
+
+    if (best == NULL) return N3DS_BATTLE_TOUCH_TARGET_NOT_FOUND;
+    if (outActivity != NULL) *outActivity = bestActivity;
+    *outCurrentX = best->x;
+    *outCurrentY = best->y;
+
+    if (activeSelfVar != NULL && activeSelfVar[0] != '\0' && bestActivity <= activeGreaterThan) {
+        return N3DS_BATTLE_TOUCH_TARGET_IDLE;
+    }
+
+    // Reuse the exact transform used by the existing lower-screen battle replay.
+    Runner_prepare3DSDrawBattleState(runner);
     bool isAsrielBattle = Runner_is3DSAsrielBattle(runner);
     bool isUndyneBattle = Runner_is3DSUndyneBattle(runner);
     int32_t guiW = runner->guiWidth > 0 ? runner->guiWidth : (int32_t) runner->dataWin->gen8.defaultWindowWidth;
@@ -574,47 +627,13 @@ bool Runner_get3DSBattleTouchTarget(
     float portOffsetY = ((float) guiH * (frameScale - viewScaleY) * 0.5f) + battleYOffset;
     if (viewScaleX <= 0.0f || viewScaleY <= 0.0f) {
         runner->n3dsDrawBattleStateValid = false;
-        return false;
+        return N3DS_BATTLE_TOUCH_LAYOUT_ERROR;
     }
 
-    float targetX = (touchX - frameOffsetX - portOffsetX) / viewScaleX;
-    float targetY = (touchY - frameOffsetY - portOffsetY) / viewScaleY;
-
-    Instance* best = NULL;
-    float bestDistanceSquared = INFINITY;
-    int32_t instanceCount = (int32_t) arrlen(runner->instances);
-    repeat(instanceCount, i) {
-        Instance* inst = runner->instances[i];
-        if (inst == NULL || inst->destroyed || !inst->active || !inst->visible) continue;
-        // Prefer an exact object/ancestor name (e.g. obj_heart).  The token/sprite
-        // fallback keeps the mechanism reusable for other GameMaker titles and soul variants.
-        bool matches = Runner_objectMatches3DSNameInHierarchy(runner, inst->objectIndex, targetToken);
-        if (!matches) {
-            matches = Runner_objectContains3DSTokenInHierarchy(runner, inst->objectIndex, targetToken);
-        }
-        if (!matches && inst->spriteIndex >= 0 && (uint32_t) inst->spriteIndex < runner->dataWin->sprt.count) {
-            const char* spriteName = runner->dataWin->sprt.sprites[inst->spriteIndex].name;
-            matches = Runner_stringContainsToken(spriteName, targetToken);
-        }
-        if (!matches) continue;
-
-        float dx = inst->x - targetX;
-        float dy = inst->y - targetY;
-        float distanceSquared = dx * dx + dy * dy;
-        if (best == NULL || distanceSquared < bestDistanceSquared) {
-            best = inst;
-            bestDistanceSquared = distanceSquared;
-        }
-    }
-
+    *outTargetX = (touchX - frameOffsetX - portOffsetX) / viewScaleX;
+    *outTargetY = (touchY - frameOffsetY - portOffsetY) / viewScaleY;
     runner->n3dsDrawBattleStateValid = false;
-    if (best == NULL) return false;
-
-    *outCurrentX = best->x;
-    *outCurrentY = best->y;
-    *outTargetX = targetX;
-    *outTargetY = targetY;
-    return true;
+    return N3DS_BATTLE_TOUCH_READY;
 }
 
 static void Runner_prepare3DSBattleReplayLists(Runner* runner, Drawable* drawables, int32_t drawableCount) {
