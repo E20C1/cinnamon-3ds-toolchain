@@ -45,7 +45,9 @@ function Get-ExternalAudioFingerprint {
     $builder = New-Object System.Text.StringBuilder
     [int64]$totalBytes = 0
     foreach ($file in $files) {
-        $relative = $file.FullName.Substring($root.Length).TrimStart([char[]]@('\\', '/')).Replace('\\', '/')
+        $trimChars = [char[]]@([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+        $relative = $file.FullName.Substring($root.Length).TrimStart($trimChars)
+        $relative = $relative.Replace([System.IO.Path]::DirectorySeparatorChar, [char]'/')
         $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName).Hash.ToLowerInvariant()
         [void]$builder.Append($relative)
         [void]$builder.Append('|')
