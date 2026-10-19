@@ -66,6 +66,8 @@ typedef struct {
     char battleFollowActiveSelfVar[64];
     int32_t battleFollowActiveGreaterThan;
     int32_t battleFollowTolerance;
+    uint32_t battleFollowActivationMs;
+    float battleFollowStepHint;
 } N3DSInputProfile;
 
 typedef struct {
@@ -78,6 +80,178 @@ typedef struct {
     uint8_t tapPulseFrames;
 } N3DSTouchState;
 
+typedef struct {
+    bool engaged;
+    bool havePreviousSample;
+    float previousX;
+    float previousY;
+    float estimatedStepX;
+    float estimatedStepY;
+    bool lastCommandX;
+    bool lastCommandY;
+    int32_t lastDirectionX;
+    int32_t lastDirectionY;
+    int32_t majorAxis;
+    float minorPhase;
+} N3DSBattleFollowController;
+
+static int32_t N3DS_signFloat(float value) {
+    if (value > 0.0f) return 1;
+    if (value < 0.0f) return -1;
+    return 0;
+}
+
+static void N3DSBattleFollowController_reset(N3DSBattleFollowController* controller, float stepHint) {
+    if (controller == NULL) return;
+    memset(controller, 0, sizeof(*controller));
+    if (!isfinite(stepHint) || stepHint <= 0.0f) stepHint = 4.0f;
+    controller->estimatedStepX = stepHint;
+    controller->estimatedStepY = stepHint;
+    controller->minorPhase = 0.5f;
+}
+
+static void N3DSBattleFollowController_observe(
+    N3DSBattleFollowController* controller,
+    float currentX,
+    float currentY
+) {
+    if (controller == NULL) return;
+
+    if (controller->havePreviousSample) {
+        float deltaX = currentX - controller->previousX;
+        float deltaY = currentY - controller->previousY;
+        if (controller->lastCommandX && controller->lastDirectionX != 0 &&
+            deltaX * (float) controller->lastDirectionX > 0.05f) {
+            float observed = fabsf(deltaX);
+            if (observed >= 0.25f && observed <= 16.0f) {
+                controller->estimatedStepX = controller->estimatedStepX * 0.75f + observed * 0.25f;
+            }
+        }
+        if (controller->lastCommandY && controller->lastDirectionY != 0 &&
+            deltaY * (float) controller->lastDirectionY > 0.05f) {
+            float observed = fabsf(deltaY);
+            if (observed >= 0.25f && observed <= 16.0f) {
+                controller->estimatedStepY = controller->estimatedStepY * 0.75f + observed * 0.25f;
+            }
+        }
+    }
+
+    controller->previousX = currentX;
+    controller->previousY = currentY;
+    controller->havePreviousSample = true;
+}
+
+static bool N3DSBattleFollowController_axisShouldMove(float error, float estimatedStep, float tolerance) {
+    float absError = fabsf(error);
+    if (!isfinite(absError) || absError <= 0.0f) return false;
+    if (!isfinite(estimatedStep) || estimatedStep < 0.25f) estimatedStep = 4.0f;
+    if (!isfinite(tolerance) || tolerance < 0.5f) tolerance = 0.5f;
+
+    // A digital input can only move in whole per-frame steps.  Stop at the
+    // closest reachable point instead of overshooting and correcting forever.
+    float arrivalWindow = fminf(tolerance, fmaxf(0.75f, estimatedStep * 0.5f));
+    if (absError <= arrivalWindow) return false;
+
+    float projectedError = fabsf(absError - estimatedStep);
+    return projectedError + 0.05f < absError;
+}
+
+static void N3DSBattleFollowController_compute(
+    N3DSBattleFollowController* controller,
+    float activity,
+    float currentX,
+    float currentY,
+    float targetX,
+    float targetY,
+    float tolerance,
+    bool* outLeft,
+    bool* outRight,
+    bool* outUp,
+    bool* outDown
+) {
+    if (controller == NULL || outLeft == NULL || outRight == NULL || outUp == NULL || outDown == NULL) return;
+
+    *outLeft = false;
+    *outRight = false;
+    *outUp = false;
+    *outDown = false;
+
+    N3DSBattleFollowController_observe(controller, currentX, currentY);
+
+    float errorX = targetX - currentX;
+    float errorY = targetY - currentY;
+    int32_t directionX = N3DS_signFloat(errorX);
+    int32_t directionY = N3DS_signFloat(errorY);
+    bool canMoveX = directionX != 0 && N3DSBattleFollowController_axisShouldMove(
+        errorX,
+        controller->estimatedStepX,
+        tolerance
+    );
+    bool canMoveY = directionY != 0 && N3DSBattleFollowController_axisShouldMove(
+        errorY,
+        controller->estimatedStepY,
+        tolerance
+    );
+
+    bool commandX = false;
+    bool commandY = false;
+
+    // movement==1 is UNDERTALE's free red-soul movement.  For gravity/special
+    // modes preserve continuous digital semantics rather than pulse keys that
+    // may have jump/guard meaning.
+    if (fabsf(activity - 1.0f) > 0.25f) {
+        commandX = canMoveX;
+        commandY = canMoveY;
+    } else if (canMoveX || canMoveY) {
+        float framesX = canMoveX ? fabsf(errorX) / fmaxf(controller->estimatedStepX, 0.25f) : 0.0f;
+        float framesY = canMoveY ? fabsf(errorY) / fmaxf(controller->estimatedStepY, 0.25f) : 0.0f;
+        int32_t majorAxis = framesX >= framesY ? 1 : 2;
+        if (!canMoveX) majorAxis = 2;
+        if (!canMoveY) majorAxis = 1;
+
+        if (controller->majorAxis != majorAxis) {
+            controller->majorAxis = majorAxis;
+            controller->minorPhase = 0.5f;
+        }
+
+        if (majorAxis == 1) {
+            commandX = canMoveX;
+            if (canMoveY && framesX > 0.0001f) {
+                float ratio = fminf(1.0f, framesY / framesX);
+                controller->minorPhase += ratio;
+                if (controller->minorPhase >= 1.0f) {
+                    commandY = true;
+                    controller->minorPhase -= 1.0f;
+                }
+            }
+        } else {
+            commandY = canMoveY;
+            if (canMoveX && framesY > 0.0001f) {
+                float ratio = fminf(1.0f, framesX / framesY);
+                controller->minorPhase += ratio;
+                if (controller->minorPhase >= 1.0f) {
+                    commandX = true;
+                    controller->minorPhase -= 1.0f;
+                }
+            }
+        }
+    }
+
+    if (commandX) {
+        if (directionX < 0) *outLeft = true;
+        else if (directionX > 0) *outRight = true;
+    }
+    if (commandY) {
+        if (directionY < 0) *outUp = true;
+        else if (directionY > 0) *outDown = true;
+    }
+
+    controller->lastCommandX = commandX;
+    controller->lastCommandY = commandY;
+    controller->lastDirectionX = commandX ? directionX : 0;
+    controller->lastDirectionY = commandY ? directionY : 0;
+}
+
 static void N3DSInputProfile_setDefaults(N3DSInputProfile* profile) {
     if (profile == NULL) return;
     memset(profile, 0, sizeof(*profile));
@@ -87,6 +261,8 @@ static void N3DSInputProfile_setDefaults(N3DSInputProfile* profile) {
     profile->dragDeadzonePx = 18;
     profile->battleFollowTargetObjectIndex = -1;
     profile->battleFollowTolerance = 4;
+    profile->battleFollowActivationMs = 50u;
+    profile->battleFollowStepHint = 4.0f;
 }
 
 static void N3DSInputProfile_load(N3DSInputProfile* profile, const char* path) {
@@ -118,6 +294,8 @@ static void N3DSInputProfile_load(N3DSInputProfile* profile, const char* path) {
         }
         else if (strcmp(key, "battle_follow_active_greater_than") == 0) profile->battleFollowActiveGreaterThan = value;
         else if (strcmp(key, "battle_follow_tolerance") == 0 && value > 0) profile->battleFollowTolerance = value;
+        else if (strcmp(key, "battle_follow_activation_ms") == 0 && value >= 0) profile->battleFollowActivationMs = (uint32_t) value;
+        else if (strcmp(key, "battle_follow_step_hint") == 0 && value > 0) profile->battleFollowStepHint = (float) value;
     }
     fclose(file);
 
@@ -126,6 +304,10 @@ static void N3DSInputProfile_load(N3DSInputProfile* profile, const char* path) {
     if (profile->tapMaxMovePx < 2 || profile->tapMaxMovePx > 64) profile->tapMaxMovePx = 10;
     if (profile->dragDeadzonePx < profile->tapMaxMovePx || profile->dragDeadzonePx > 120) profile->dragDeadzonePx = 18;
     if (profile->battleFollowTolerance < 1 || profile->battleFollowTolerance > 64) profile->battleFollowTolerance = 4;
+    if (profile->battleFollowActivationMs > 500u) profile->battleFollowActivationMs = 50u;
+    if (!isfinite(profile->battleFollowStepHint) || profile->battleFollowStepHint < 0.25f || profile->battleFollowStepHint > 16.0f) {
+        profile->battleFollowStepHint = 4.0f;
+    }
     if (profile->battleFollowTargetToken[0] == '\0') profile->battleFollowEnabled = false;
 }
 
@@ -825,6 +1007,8 @@ int main(int argc, char** argv) {
     N3DSInputProfile inputProfile;
     N3DSInputProfile_load(&inputProfile, "romfs:/cinnamon_input_profile.cfg");
     N3DSTouchState touchState = {0};
+    N3DSBattleFollowController battleFollowController;
+    N3DSBattleFollowController_reset(&battleFollowController, inputProfile.battleFollowStepHint);
 
     char* dataWinPath = chooseDataWinPath();
 
@@ -971,58 +1155,84 @@ int main(int argc, char** argv) {
         }
 
         N3DSTouchState_update(&touchState, &inputProfile, held, down, up);
+        if (down & KEY_TOUCH) {
+            N3DSBattleFollowController_reset(&battleFollowController, inputProfile.battleFollowStepHint);
+        }
 
         bool touchLeft = false;
         bool touchRight = false;
         bool touchUp = false;
         bool touchDown = false;
-        if (inputProfile.touchEnabled && touchState.active && touchState.tapCancelled) {
-            bool usedBattleFollow = false;
-            if (inputProfile.battleFollowEnabled) {
-                float activity = 0.0f;
-                float currentX = 0.0f;
-                float currentY = 0.0f;
-                float targetX = 0.0f;
-                float targetY = 0.0f;
-                N3DSBattleTouchStatus followStatus = Runner_get3DSBattleTouchTarget(
-                    runner,
-                    inputProfile.battleFollowTargetToken,
-                    inputProfile.battleFollowTargetObjectIndex,
-                    inputProfile.battleFollowActiveSelfVar,
-                    (float) inputProfile.battleFollowActiveGreaterThan,
-                    (float) touchState.current.px,
-                    (float) touchState.current.py,
-                    &activity,
-                    &currentX,
-                    &currentY,
-                    &targetX,
-                    &targetY
-                );
-                debugMonitor.touchFollowStatus = followStatus;
-                debugMonitor.touchFollowActivity = activity;
-                debugMonitor.touchFollowCurrentX = currentX;
-                debugMonitor.touchFollowCurrentY = currentY;
-                debugMonitor.touchFollowTargetX = targetX;
-                debugMonitor.touchFollowTargetY = targetY;
+        bool usedBattleFollow = false;
+        if (inputProfile.touchEnabled && touchState.active && inputProfile.battleFollowEnabled) {
+            float activity = 0.0f;
+            float currentX = 0.0f;
+            float currentY = 0.0f;
+            float targetX = 0.0f;
+            float targetY = 0.0f;
+            N3DSBattleTouchStatus followStatus = Runner_get3DSBattleTouchTarget(
+                runner,
+                inputProfile.battleFollowTargetToken,
+                inputProfile.battleFollowTargetObjectIndex,
+                inputProfile.battleFollowActiveSelfVar,
+                (float) inputProfile.battleFollowActiveGreaterThan,
+                (float) touchState.current.px,
+                (float) touchState.current.py,
+                &activity,
+                &currentX,
+                &currentY,
+                &targetX,
+                &targetY
+            );
+            debugMonitor.touchFollowStatus = followStatus;
+            debugMonitor.touchFollowActivity = activity;
+            debugMonitor.touchFollowCurrentX = currentX;
+            debugMonitor.touchFollowCurrentY = currentY;
+            debugMonitor.touchFollowTargetX = targetX;
+            debugMonitor.touchFollowTargetY = targetY;
 
-                if (followStatus == N3DS_BATTLE_TOUCH_READY) {
-                    float tolerance = (float) inputProfile.battleFollowTolerance;
-                    touchLeft = currentX > targetX + tolerance;
-                    touchRight = currentX < targetX - tolerance;
-                    touchUp = currentY > targetY + tolerance;
-                    touchDown = currentY < targetY - tolerance;
+            if (followStatus == N3DS_BATTLE_TOUCH_READY) {
+                float errorX = targetX - currentX;
+                float errorY = targetY - currentY;
+                float distance = sqrtf(errorX * errorX + errorY * errorY);
+                float activationDistance = fmaxf(
+                    (float) inputProfile.battleFollowTolerance * 2.0f,
+                    inputProfile.battleFollowStepHint * 2.0f
+                );
+                u64 touchAgeMs = osGetTime() - touchState.startMs;
+
+                if (touchState.tapCancelled || battleFollowController.engaged ||
+                    (distance > activationDistance && touchAgeMs >= inputProfile.battleFollowActivationMs)) {
+                    battleFollowController.engaged = true;
+                    touchState.tapCancelled = true;
+                    N3DSBattleFollowController_compute(
+                        &battleFollowController,
+                        activity,
+                        currentX,
+                        currentY,
+                        targetX,
+                        targetY,
+                        (float) inputProfile.battleFollowTolerance,
+                        &touchLeft,
+                        &touchRight,
+                        &touchUp,
+                        &touchDown
+                    );
                     usedBattleFollow = true;
                 }
             }
+        }
 
-            if (!usedBattleFollow) {
-                int32_t dx = (int32_t) touchState.current.px - (int32_t) touchState.start.px;
-                int32_t dy = (int32_t) touchState.current.py - (int32_t) touchState.start.py;
-                touchLeft = dx < -inputProfile.dragDeadzonePx;
-                touchRight = dx > inputProfile.dragDeadzonePx;
-                touchUp = dy < -inputProfile.dragDeadzonePx;
-                touchDown = dy > inputProfile.dragDeadzonePx;
-            }
+        if (inputProfile.touchEnabled && touchState.active && touchState.tapCancelled && !usedBattleFollow) {
+            int32_t dx = (int32_t) touchState.current.px - (int32_t) touchState.start.px;
+            int32_t dy = (int32_t) touchState.current.py - (int32_t) touchState.start.py;
+            touchLeft = dx < -inputProfile.dragDeadzonePx;
+            touchRight = dx > inputProfile.dragDeadzonePx;
+            touchUp = dy < -inputProfile.dragDeadzonePx;
+            touchDown = dy > inputProfile.dragDeadzonePx;
+        }
+        if (!touchState.active && (up & KEY_TOUCH)) {
+            N3DSBattleFollowController_reset(&battleFollowController, inputProfile.battleFollowStepHint);
         }
         bool touchTap = inputProfile.touchEnabled && touchState.tapPulseFrames > 0u;
 
