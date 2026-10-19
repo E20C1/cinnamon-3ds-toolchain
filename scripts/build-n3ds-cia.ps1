@@ -13,6 +13,7 @@ param(
     [string]$Tex3ds = "",
     [string]$Makerom = "",
     [string]$Bannertool = "",
+    [string]$DspFirm = "",
 
     [string]$PresetId = "",
     [string]$Title = "",
@@ -187,6 +188,41 @@ function Install-PinnedPackagingTool {
     return $resolved
 }
 
+
+function Resolve-DspFirmPath {
+    param([string]$ExplicitPath)
+
+    $candidates = New-Object System.Collections.Generic.List[string]
+    if ($ExplicitPath) {
+        $candidates.Add((Resolve-InputPath -Path $ExplicitPath))
+    }
+    if ($env:N3DS_DSPFIRM) {
+        $candidates.Add((Resolve-InputPath -Path $env:N3DS_DSPFIRM))
+    }
+
+    # Convenience for users building while the 3DS SD card is mounted.
+    foreach ($drive in [System.IO.DriveInfo]::GetDrives()) {
+        try {
+            if (-not $drive.IsReady -or $drive.DriveType -ne [System.IO.DriveType]::Removable) { continue }
+            $candidates.Add((Join-Path $drive.RootDirectory.FullName "3ds\dspfirm.cdc"))
+        }
+        catch {
+        }
+    }
+
+    foreach ($candidate in $candidates) {
+        if ($candidate -and (Test-Path -LiteralPath $candidate -PathType Leaf)) {
+            $file = Get-Item -LiteralPath $candidate
+            if ($file.Length -lt 0x100 -or $file.Length -gt 0x10000) {
+                throw "dspfirm.cdc has an unexpected size ($($file.Length) bytes): $candidate"
+            }
+            return (Resolve-Path -LiteralPath $candidate).Path
+        }
+    }
+
+    return $null
+}
+
 function Get-ExistingPreprocessor {
     param([string]$ExplicitPath)
     if ($ExplicitPath) {
@@ -268,6 +304,19 @@ function Test-GamePresetMatch {
 }
 
 $dataWinPath = Resolve-DataWinPath -Path $DataWin
+$dspFirmPath = Resolve-DspFirmPath -ExplicitPath $DspFirm
+if (-not $dspFirmPath) {
+    throw @"
+A local dspfirm.cdc dump is required for a truly self-contained CIA.
+
+Dump DSP firmware on your own 3DS (Luma3DS: Rosalina menu > Miscellaneous options > Dump DSP firmware), then either:
+  * keep the SD card mounted while building, or
+  * pass -DspFirm <path-to-dspfirm.cdc>, or
+  * set N3DS_DSPFIRM to that file.
+
+The firmware is not downloaded or stored in this repository.
+"@
+}
 $buildPath = Resolve-RepoPath -Path $BuildDir
 $usingPrivateAssetDir = -not [bool]$AssetDir
 $assetPath = if ($usingPrivateAssetDir) {
@@ -444,6 +493,7 @@ try {
         Copy-Item -LiteralPath $item.FullName -Destination $romfsPath -Recurse -Force
     }
     Copy-Item -LiteralPath $dataWinPath -Destination (Join-Path $romfsPath "data.win") -Force
+    Copy-Item -LiteralPath $dspFirmPath -Destination (Join-Path $romfsPath "dspfirm.cdc") -Force
 
     Write-Host ""
     Write-Host "Building Nintendo 3DS ELF for CIA packaging..."
@@ -523,6 +573,7 @@ try {
 
     $ciaHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $ciaPath).Hash.ToLowerInvariant()
     $dataWinHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $dataWinPath).Hash.ToLowerInvariant()
+    $dspFirmHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $dspFirmPath).Hash.ToLowerInvariant()
     $elfHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $elfPath).Hash.ToLowerInvariant()
 
     $manifestDir = Join-Path $repoRoot "build\repro"
@@ -548,6 +599,8 @@ try {
         }
         configuration = $Configuration
         data_win_sha256 = $dataWinHash
+        dsp_firm_sha256 = $dspFirmHash
+        dsp_firm_embedded = $true
         elf = $elfPath
         elf_sha256 = $elfHash
         cia = (Resolve-Path -LiteralPath $ciaPath).Path
