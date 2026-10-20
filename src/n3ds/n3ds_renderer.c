@@ -5671,16 +5671,12 @@ void N3DSRenderer_writeAttackDirectDiagnostic(Renderer* base, FILE* file) {
         if (!N3DSRenderer_matchesAttackDiagnosticSprite(sprite->name)) continue;
 
         char sheetPath[256];
-        char resolvedSheetPath[512];
         snprintf(sheetPath, sizeof(sheetPath), "sprites/spr_%05lu.t3x", (unsigned long) spriteIndex);
         bool packedSheet = N3DSRenderer_hasPackedDirectAsset(renderer, sheetPath);
-        bool looseSheet = N3DSRenderer_resolveAssetPath(renderer, sheetPath, resolvedSheetPath, sizeof(resolvedSheetPath));
 
         uint32_t packedFrames = 0;
-        uint32_t looseFrames = 0;
         repeat(sprite->textureCount, frameIndex) {
             char framePath[256];
-            char resolvedFramePath[512];
             snprintf(
                 framePath,
                 sizeof(framePath),
@@ -5689,7 +5685,6 @@ void N3DSRenderer_writeAttackDirectDiagnostic(Renderer* base, FILE* file) {
                 frameIndex
             );
             if (N3DSRenderer_hasPackedDirectAsset(renderer, framePath)) packedFrames++;
-            if (N3DSRenderer_resolveAssetPath(renderer, framePath, resolvedFramePath, sizeof(resolvedFramePath))) looseFrames++;
         }
 
         N3DSDirectSpriteAsset* directAsset =
@@ -5701,7 +5696,7 @@ void N3DSRenderer_writeAttackDirectDiagnostic(Renderer* base, FILE* file) {
             line,
             sizeof(line),
             "# attack-direct-diag sprite=%lu name=%s width=%lu height=%lu textures=%lu canonical=%d "
-            "packed_sheet=%d loose_sheet=%d packed_frames=%lu loose_frames=%lu "
+            "packed_sheet=%d packed_frames=%lu "
             "sheet_attempted=%d sheet_ready=%d sheet_failed=%d sheet_frames=%lu use_frame_fallback=%d\n",
             (unsigned long) spriteIndex,
             sprite->name != NULL ? sprite->name : "",
@@ -5710,9 +5705,7 @@ void N3DSRenderer_writeAttackDirectDiagnostic(Renderer* base, FILE* file) {
             (unsigned long) sprite->textureCount,
             N3DSRenderer_isCanonicalAttackDirectSprite(sprite) ? 1 : 0,
             packedSheet ? 1 : 0,
-            looseSheet ? 1 : 0,
             (unsigned long) packedFrames,
-            (unsigned long) looseFrames,
             directAsset != NULL && directAsset->sheetLoadAttempted ? 1 : 0,
             directAsset != NULL && directAsset->sheetAsset.ready ? 1 : 0,
             directAsset != NULL && directAsset->sheetAsset.failed ? 1 : 0,
