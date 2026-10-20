@@ -119,6 +119,7 @@ enum {
     N3DS_OBJ_TRAIT_FIELD_BACK         = 1u << 8,
     N3DS_OBJ_TRAIT_ASRIEL             = 1u << 9,
     N3DS_OBJ_TRAIT_UNDYNE             = 1u << 10,
+    N3DS_OBJ_TRAIT_WHTPXLGRAV         = 1u << 11,
 };
 
 enum {
@@ -129,6 +130,7 @@ enum {
     N3DS_SPR_TRAIT_BORDER          = 1u << 4,
     N3DS_SPR_TRAIT_ASRIEL          = 1u << 5,
     N3DS_SPR_TRAIT_UNDYNE          = 1u << 6,
+    N3DS_SPR_TRAIT_WHTPXL          = 1u << 7,
 };
 
 static bool Runner_stringContainsToken(const char* haystack, const char* needle) {
@@ -332,6 +334,7 @@ static uint32_t Runner_compute3DSObjectTraits(Runner* runner, int32_t objectInde
             }
             if (Runner_stringContainsToken(name, "asriel")) traits |= N3DS_OBJ_TRAIT_ASRIEL;
             if (Runner_stringContainsToken(name, "undyne")) traits |= N3DS_OBJ_TRAIT_UNDYNE;
+            if (depth == 0 && strcmp(name, "obj_whtpxlgrav") == 0) traits |= N3DS_OBJ_TRAIT_WHTPXLGRAV;
         }
         objectIndex = runner->dataWin->objt.objects[objectIndex].parentId;
         depth++;
@@ -351,6 +354,12 @@ static uint16_t Runner_compute3DSSpriteTraits(Sprite* sprite) {
     if (Runner_stringContainsToken(name, "border")) traits |= N3DS_SPR_TRAIT_BORDER;
     if (Runner_stringContainsToken(name, "asriel")) traits |= N3DS_SPR_TRAIT_ASRIEL;
     if (Runner_stringContainsToken(name, "undyne")) traits |= N3DS_SPR_TRAIT_UNDYNE;
+    if (name != NULL && strcmp(name, "spr_pixwht") == 0 &&
+        sprite->width == 2 && sprite->height == 2 &&
+        sprite->originX == 0 && sprite->originY == 0 &&
+        sprite->textureCount == 12 && !sprite->nineSliceEnabled) {
+        traits |= N3DS_SPR_TRAIT_WHTPXL;
+    }
     return traits;
 }
 
@@ -1905,6 +1914,55 @@ static void rebuildDrawableCacheIfDirty(Runner* runner) {
     }
 }
 
+#ifdef __3DS__
+static bool Runner_tryDraw3DSWhtPxlGravFast(Runner* runner, Instance* inst) {
+    if (runner == NULL || inst == NULL || runner->renderer == NULL || runner->osType != OS_3DS) return false;
+    if ((Runner_get3DSObjectTraits(runner, inst->objectIndex) & N3DS_OBJ_TRAIT_WHTPXLGRAV) == 0) return false;
+    if ((Runner_get3DSSpriteTraits(runner, inst->spriteIndex) & N3DS_SPR_TRAIT_WHTPXL) == 0) return false;
+
+    // The original UNDERTALE spr_pixwht is twelve opaque 2x2 solid-gray frames.
+    // Preserve image_index animation, image_blend, image_alpha and scaling while
+    // bypassing the generic textured-sprite/TPAG pipeline for this one effect.
+    static const uint8_t kFrameGray[12] = {
+        73u, 109u, 146u, 182u, 219u, 251u,
+        251u, 251u, 251u, 251u, 251u, 255u
+    };
+
+    if (!Renderer_isFiniteFloat((float) inst->x) || !Renderer_isFiniteFloat((float) inst->y) ||
+        !Renderer_isFiniteFloat(inst->imageXscale) || !Renderer_isFiniteFloat(inst->imageYscale) ||
+        !Renderer_isFiniteFloat(inst->imageAngle) || !Renderer_isFiniteFloat(inst->imageAlpha)) {
+        return false;
+    }
+    // A solid rectangle is rotation-invariant only for 90-degree multiples, but
+    // the canonical particle never rotates. Fall back if gameplay/mod code adds rotation.
+    if (fabsf(inst->imageAngle) >= 0.001f) return false;
+
+    int32_t frame = (int32_t) inst->imageIndex % 12;
+    if (frame < 0) frame += 12;
+    uint32_t gray = kFrameGray[frame];
+    uint32_t blend = inst->imageBlend;
+    uint32_t r = (gray * (uint32_t) BGR_R(blend) + 127u) / 255u;
+    uint32_t g = (gray * (uint32_t) BGR_G(blend) + 127u) / 255u;
+    uint32_t b = (gray * (uint32_t) BGR_B(blend) + 127u) / 255u;
+    uint32_t color = (b << 16) | (g << 8) | r;
+
+    float width = 2.0f * inst->imageXscale;
+    float height = 2.0f * inst->imageYscale;
+    if (width == 0.0f || height == 0.0f) return true;
+
+    runner->renderer->vtable->drawRectangle(
+        runner->renderer,
+        (float) inst->x,
+        (float) inst->y,
+        (float) inst->x + width,
+        (float) inst->y + height,
+        color,
+        inst->imageAlpha,
+        false
+    );
+    return true;
+}
+#endif
 void Runner_draw(Runner* runner) {
     Room* room = runner->currentRoom;
 
@@ -2071,7 +2129,13 @@ void Runner_draw(Runner* runner) {
             if (codeId >= 0) {
                 Runner_executeResolvedEvent(runner, inst, EVENT_DRAW, DRAW_NORMAL, codeId, ownerObjectIndex);
             } else if (runner->renderer != nullptr) {
+#ifdef __3DS__
+                if (!Runner_tryDraw3DSWhtPxlGravFast(runner, inst)) {
+                    Renderer_drawSelf(runner->renderer, inst);
+                }
+#else
                 Renderer_drawSelf(runner->renderer, inst);
+#endif
             }
 #ifdef __3DS__
             if (offsetTopBattleEnemy) {
