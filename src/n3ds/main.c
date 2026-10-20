@@ -26,6 +26,7 @@
 #define N3DS_DUST_PERF_PRE_FRAMES 12u
 #define N3DS_DUST_PERF_POST_FRAMES 8u
 #define N3DS_DUST_PERF_MAX_FRAMES 256u
+#define N3DS_PERF_IMPORT_PAGE_CAP 16u
 #define N3DS_DUST_PERF_LOG_PATH "sdmc:/3ds/cinnamon/dust_perf.log"
 
 void N3DS_tryTriggerAsrielLed(Runner* runner);
@@ -75,6 +76,19 @@ typedef struct {
     uint32_t importFailures;
     uint32_t directAssetLoads;
     uint32_t textureSwitches;
+    int32_t atlasImportObjectIndex;
+    uint32_t atlasImportInstanceId;
+    int32_t atlasImportInstanceSpriteIndex;
+    int32_t atlasImportInstanceSubimg;
+    int32_t atlasImportInstanceTPAGIndex;
+    int32_t atlasImportTriggerTPAGIndex;
+    int32_t atlasImportTriggerSpriteIndex;
+    int32_t atlasImportTriggerFrameIndex;
+    uint32_t atlasImportCount;
+    uint32_t atlasImportEvictions;
+    uint32_t atlasImportPass;
+    uint32_t atlasImportPageCount;
+    uint16_t atlasImportPages[N3DS_PERF_IMPORT_PAGE_CAP];
     int32_t targetChoiceObjectIndex;
     uint32_t targetChoiceInstanceId;
     int32_t targetChoiceSpriteIndex;
@@ -805,6 +819,13 @@ static N3DSDustPerfFrame N3DSDustPerf_captureFrame(Runner* runner, Renderer* ren
     N3DSDustPerfFrame sample;
     memset(&sample, 0, sizeof(sample));
     sample.frame = runner != NULL ? runner->frameCount : -1;
+    sample.atlasImportObjectIndex = -1;
+    sample.atlasImportInstanceSpriteIndex = -1;
+    sample.atlasImportInstanceSubimg = -1;
+    sample.atlasImportInstanceTPAGIndex = -1;
+    sample.atlasImportTriggerTPAGIndex = -1;
+    sample.atlasImportTriggerSpriteIndex = -1;
+    sample.atlasImportTriggerFrameIndex = -1;
     sample.targetChoiceObjectIndex = -1;
     sample.targetChoiceSpriteIndex = -1;
     sample.targetChoiceSubimg = -1;
@@ -840,6 +861,27 @@ static N3DSDustPerfFrame N3DSDustPerf_captureFrame(Runner* runner, Renderer* ren
         sample.topStepObjectIndex = runner->frameStepTopObjectIndex;
         sample.topStepObjectMs = runner->frameStepTopObjectMs;
         sample.topStepObjectCalls = runner->frameStepTopObjectCalls;
+
+        sample.atlasImportObjectIndex = runner->frameDrawTopImportObjectIndex;
+        sample.atlasImportInstanceId = runner->frameDrawTopImportInstanceId;
+        sample.atlasImportInstanceSpriteIndex = runner->frameDrawTopImportInstanceSpriteIndex;
+        sample.atlasImportInstanceSubimg = runner->frameDrawTopImportInstanceSubimg;
+        sample.atlasImportInstanceTPAGIndex = runner->frameDrawTopImportInstanceTPAGIndex;
+        sample.atlasImportTriggerTPAGIndex = runner->frameDrawTopImportTriggerTPAGIndex;
+        sample.atlasImportTriggerSpriteIndex =
+            N3DSRenderer_getSpriteIndexForTPAG(renderer, sample.atlasImportTriggerTPAGIndex);
+        sample.atlasImportTriggerFrameIndex =
+            N3DSRenderer_getSpriteFrameIndexForTPAG(renderer, sample.atlasImportTriggerTPAGIndex);
+        sample.atlasImportCount = runner->frameDrawTopImportCount;
+        sample.atlasImportEvictions = runner->frameDrawTopImportEvictions;
+        sample.atlasImportPass = runner->frameDrawTopImportPass;
+        sample.atlasImportPageCount = runner->frameDrawTopImportPageCount;
+        if (sample.atlasImportPageCount > N3DS_PERF_IMPORT_PAGE_CAP) {
+            sample.atlasImportPageCount = N3DS_PERF_IMPORT_PAGE_CAP;
+        }
+        repeat(sample.atlasImportPageCount, pageIndex) {
+            sample.atlasImportPages[pageIndex] = runner->frameDrawTopImportPages[pageIndex];
+        }
 
         N3DSBattleMenuState battleState;
         if (Runner_get3DSBattleMenuState(runner, &battleState)) {
@@ -931,7 +973,10 @@ static void N3DSPerf_writeEvent(
         "frame_begin_ms,renderer_begin_ms,draw_views_ms,overlay_ms,renderer_end_ms,frame_end_ms,"
         "c3d_cpu_ms,gpu_prev_ms,cmd_buf_pct,sprite_calls,part_calls,c2d_flushes,"
         "atlas_blob_reads,direct_blob_reads,page_imports,page_evictions,import_failures,"
-        "direct_asset_loads,texture_switches,target_object,target_name,target_instance,target_sprite,"
+        "direct_asset_loads,texture_switches,atlas_object,atlas_object_name,atlas_instance,"
+        "atlas_instance_sprite,atlas_instance_sprite_name,atlas_instance_subimg,atlas_instance_tpag,"
+        "atlas_trigger_tpag,atlas_trigger_sprite,atlas_trigger_sprite_name,atlas_trigger_frame,"
+        "atlas_imports,atlas_evictions,atlas_pass,atlas_pages,target_object,target_name,target_instance,target_sprite,"
         "target_subimg,target_tpag,target_image_index,target_image_speed,battle_active,myfight,mnfight,"
         "top_step_object,top_step_name,top_step_ms,top_step_calls\n", file);
 
@@ -951,6 +996,46 @@ static void N3DSPerf_writeEvent(
             if (candidate != NULL) targetName = candidate;
         }
 
+        const char* atlasObjectName = "";
+        if (runner != NULL && sample->atlasImportObjectIndex >= 0 &&
+            (uint32_t) sample->atlasImportObjectIndex < runner->dataWin->objt.count) {
+            const char* candidate = runner->dataWin->objt.objects[sample->atlasImportObjectIndex].name;
+            if (candidate != NULL) atlasObjectName = candidate;
+        }
+
+        const char* atlasInstanceSpriteName = "";
+        if (runner != NULL && sample->atlasImportInstanceSpriteIndex >= 0 &&
+            (uint32_t) sample->atlasImportInstanceSpriteIndex < runner->dataWin->sprt.count) {
+            const char* candidate = runner->dataWin->sprt.sprites[sample->atlasImportInstanceSpriteIndex].name;
+            if (candidate != NULL) atlasInstanceSpriteName = candidate;
+        }
+
+        const char* atlasTriggerSpriteName = "";
+        if (runner != NULL && sample->atlasImportTriggerSpriteIndex >= 0 &&
+            (uint32_t) sample->atlasImportTriggerSpriteIndex < runner->dataWin->sprt.count) {
+            const char* candidate = runner->dataWin->sprt.sprites[sample->atlasImportTriggerSpriteIndex].name;
+            if (candidate != NULL) atlasTriggerSpriteName = candidate;
+        }
+
+        const char* atlasPassName =
+            sample->atlasImportPass == 1u ? "main" :
+            sample->atlasImportPass == 2u ? "replay" : "";
+
+        char atlasPages[128];
+        atlasPages[0] = '\0';
+        size_t atlasPagesCursor = 0;
+        repeat(sample->atlasImportPageCount, pageIndex) {
+            int written = snprintf(
+                atlasPages + atlasPagesCursor,
+                sizeof(atlasPages) - atlasPagesCursor,
+                "%s%u",
+                pageIndex == 0 ? "" : "|",
+                (unsigned int) sample->atlasImportPages[pageIndex]
+            );
+            if (written <= 0 || (size_t) written >= sizeof(atlasPages) - atlasPagesCursor) break;
+            atlasPagesCursor += (size_t) written;
+        }
+
         fprintf(file,
             "%ld,%s,%lu,%lu,%lu,%lu,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,"
             "%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.2f,%lu,%lu,%lu",
@@ -965,12 +1050,28 @@ static void N3DSPerf_writeEvent(
             (unsigned long) sample->spriteDrawCalls, (unsigned long) sample->spritePartDrawCalls,
             (unsigned long) sample->c2dFlushes);
         fprintf(file,
-            ",%lu,%lu,%lu,%lu,%lu,%lu,%lu,%ld,%s,%lu,%ld,%ld,%ld,%.3f,%.3f,%ld,%ld,%ld",
+            ",%lu,%lu,%lu,%lu,%lu,%lu,%lu",
             (unsigned long) sample->atlasBlobReads, (unsigned long) sample->directBlobReads,
             (unsigned long) sample->pageImports, (unsigned long) sample->pageEvictions,
             (unsigned long) sample->importFailures, (unsigned long) sample->directAssetLoads,
-            (unsigned long) sample->textureSwitches, (long) sample->targetChoiceObjectIndex,
-            targetName, (unsigned long) sample->targetChoiceInstanceId,
+            (unsigned long) sample->textureSwitches);
+        fprintf(file,
+            ",%ld,%s,%lu,%ld,%s,%ld,%ld,%ld,%ld,%s,%ld,%lu,%lu,%s,%s",
+            (long) sample->atlasImportObjectIndex, atlasObjectName,
+            (unsigned long) sample->atlasImportInstanceId,
+            (long) sample->atlasImportInstanceSpriteIndex, atlasInstanceSpriteName,
+            (long) sample->atlasImportInstanceSubimg,
+            (long) sample->atlasImportInstanceTPAGIndex,
+            (long) sample->atlasImportTriggerTPAGIndex,
+            (long) sample->atlasImportTriggerSpriteIndex, atlasTriggerSpriteName,
+            (long) sample->atlasImportTriggerFrameIndex,
+            (unsigned long) sample->atlasImportCount,
+            (unsigned long) sample->atlasImportEvictions,
+            atlasPassName, atlasPages);
+        fprintf(file,
+            ",%ld,%s,%lu,%ld,%ld,%ld,%.3f,%.3f,%ld,%ld,%ld",
+            (long) sample->targetChoiceObjectIndex, targetName,
+            (unsigned long) sample->targetChoiceInstanceId,
             (long) sample->targetChoiceSpriteIndex, (long) sample->targetChoiceSubimg,
             (long) sample->targetChoiceTPAGIndex, (double) sample->targetChoiceImageIndex,
             (double) sample->targetChoiceImageSpeed, (long) sample->battleActive,
