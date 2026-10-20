@@ -564,6 +564,22 @@ static bool Runner_fill3DSBattleMenuButtonRect(
     return false;
 }
 
+uint32_t Runner_get3DSObjectInstanceCountByName(Runner* runner, const char* objectName) {
+    if (runner == NULL || runner->dataWin == NULL || runner->instancesByExactObject == NULL ||
+        runner->assetsByName == NULL || objectName == NULL || objectName[0] == '\0') return 0;
+
+    ptrdiff_t entryIndex = shgeti(runner->assetsByName, (char*) objectName);
+    if (entryIndex < 0) return 0;
+
+    int32_t objectIndex = runner->assetsByName[entryIndex].value;
+    if (objectIndex < 0 || (uint32_t) objectIndex >= runner->dataWin->objt.count) return 0;
+
+    const char* resolvedName = runner->dataWin->objt.objects[objectIndex].name;
+    if (resolvedName == NULL || strcmp(resolvedName, objectName) != 0) return 0;
+
+    return (uint32_t) arrlen(runner->instancesByExactObject[objectIndex]);
+}
+
 bool Runner_get3DSBattleMenuState(Runner* runner, N3DSBattleMenuState* outState) {
     if (outState == NULL) return false;
     memset(outState, 0, sizeof(*outState));
@@ -2503,6 +2519,7 @@ static Instance* createAndInitInstance(Runner* runner, int32_t instanceId, int32
     arrput(runner->instances, inst);
     Runner_addInstanceToObjectLists(runner, inst);
     runner->drawableListStructureDirty = true;
+    runner->frameInstancesCreated++;
 
 #ifdef ENABLE_VM_TRACING
     if (shgeti(runner->vmContext->instanceLifecyclesToBeTraced, "*") != -1 || shgeti(runner->vmContext->instanceLifecyclesToBeTraced, objDef->name) != -1) {
@@ -3251,6 +3268,7 @@ static void Runner_sweepDeadStructs(Runner* runner) {
 }
 
 void Runner_cleanupDestroyedInstances(Runner* runner) {
+    double cleanupStartMs = Runner_nowMs();
     int32_t count = (int32_t) arrlen(runner->instances);
     int32_t writeIdx = 0;
     repeat(count, i) {
@@ -3258,6 +3276,7 @@ void Runner_cleanupDestroyedInstances(Runner* runner) {
         if (!inst->destroyed) {
             runner->instances[writeIdx++] = inst;
         } else {
+            runner->frameInstancesDestroyed++;
             Runner_removeInstanceFromObjectLists(runner, inst);
             hmdel(runner->instancesById, inst->instanceId);
             Instance_free(inst);
@@ -3266,6 +3285,7 @@ void Runner_cleanupDestroyedInstances(Runner* runner) {
         }
     }
     arrsetlen(runner->instances, writeIdx);
+    runner->frameStepCleanupMs += Runner_nowMs() - cleanupStartMs;
 }
 
 void Runner_initFirstRoom(Runner* runner) {
@@ -3792,6 +3812,9 @@ void Runner_step(Runner* runner) {
     runner->frameStepMotionMs = 0.0;
     runner->frameStepCollisionMs = 0.0;
     runner->frameStepFinalizeMs = 0.0;
+    runner->frameStepCleanupMs = 0.0;
+    runner->frameInstancesCreated = 0;
+    runner->frameInstancesDestroyed = 0;
     runner->frameStepTopObjectMs = 0.0;
     runner->frameStepTopObjectCalls = 0;
     runner->frameStepTopObjectIndex = -1;

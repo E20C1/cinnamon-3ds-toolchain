@@ -467,6 +467,9 @@ typedef struct Runner {
     double frameStepMotionMs;
     double frameStepCollisionMs;
     double frameStepFinalizeMs;
+    double frameStepCleanupMs;
+    uint32_t frameInstancesCreated;
+    uint32_t frameInstancesDestroyed;
     double frameStepTopObjectMs;
     uint32_t frameStepTopObjectCalls;
     int32_t frameStepTopObjectIndex;
@@ -572,6 +575,7 @@ typedef struct {
     N3DSBattleMenuButtonRect topButtons[4];
 } N3DSBattleMenuState;
 
+uint32_t Runner_get3DSObjectInstanceCountByName(Runner* runner, const char* objectName);
 bool Runner_get3DSBattleMenuState(Runner* runner, N3DSBattleMenuState* outState);
 bool Runner_map3DSBottomBattleUITouch(
     Runner* runner,

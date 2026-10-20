@@ -23,6 +23,10 @@
 #define N3DS_BOOT_LOG_LINE_CHARS 88
 #define N3DS_TOTAL_VRAM_BYTES (6u * 1024u * 1024u)
 #define N3DS_DEBUG_ASRIEL_ROOM 330
+#define N3DS_DUST_PERF_PRE_FRAMES 12u
+#define N3DS_DUST_PERF_POST_FRAMES 8u
+#define N3DS_DUST_PERF_MAX_FRAMES 256u
+#define N3DS_DUST_PERF_LOG_PATH "sdmc:/3ds/cinnamon/dust_perf.log"
 
 void N3DS_tryTriggerAsrielLed(Runner* runner);
 
@@ -53,6 +57,45 @@ typedef struct {
     float touchFollowTargetX;
     float touchFollowTargetY;
 } N3DSDebugMonitor;
+
+typedef struct {
+    int32_t frame;
+    int32_t phase;
+    uint32_t dustCount;
+    uint32_t instancesCreated;
+    uint32_t instancesDestroyed;
+    uint32_t drawInstances;
+    uint32_t spriteDrawCalls;
+    uint32_t spritePartDrawCalls;
+    uint32_t c2dFlushes;
+    double stepMs;
+    double prepMs;
+    double eventMs;
+    double motionMs;
+    double collisionMs;
+    double cleanupMs;
+    double finalizeMs;
+    double drawInstancesMs;
+    double battleReplayMs;
+    double renderMs;
+    int32_t topStepObjectIndex;
+    double topStepObjectMs;
+    uint32_t topStepObjectCalls;
+} N3DSDustPerfFrame;
+
+typedef struct {
+    bool active;
+    bool truncated;
+    uint32_t eventId;
+    uint32_t postFramesRemaining;
+    uint32_t preCount;
+    uint32_t preWrite;
+    uint32_t sampleCount;
+    N3DSDustPerfFrame preFrames[N3DS_DUST_PERF_PRE_FRAMES];
+    N3DSDustPerfFrame samples[N3DS_DUST_PERF_MAX_FRAMES];
+} N3DSDustPerfSampler;
+
+static N3DSDustPerfSampler gN3DSDustPerfSampler;
 
 typedef struct {
     bool touchEnabled;
@@ -698,6 +741,157 @@ static void N3DS_formatDebugSize(char* out, size_t outSize, uint32_t bytes) {
     }
 
     snprintf(out, outSize, "%.2f MB", kib / 1024.0);
+}
+
+static double N3DSPerf_ticksToMs(u64 ticks) {
+    return (double) ticks * 1000.0 / (double) SYSCLOCK_ARM11;
+}
+
+static N3DSDustPerfFrame N3DSDustPerf_captureFrame(Runner* runner, Renderer* renderer, double stepMs, double renderMs) {
+    N3DSDustPerfFrame sample;
+    memset(&sample, 0, sizeof(sample));
+    sample.frame = runner != NULL ? runner->frameCount : -1;
+    sample.dustCount = Runner_get3DSObjectInstanceCountByName(runner, "obj_whtpxlgrav");
+    if (runner != NULL) {
+        sample.instancesCreated = runner->frameInstancesCreated;
+        sample.instancesDestroyed = runner->frameInstancesDestroyed;
+        sample.drawInstances = runner->frameDrawInstances;
+        sample.stepMs = stepMs;
+        sample.prepMs = runner->frameStepPrepMs;
+        sample.eventMs = runner->frameStepEventMs;
+        sample.motionMs = runner->frameStepMotionMs;
+        sample.collisionMs = runner->frameStepCollisionMs;
+        sample.cleanupMs = runner->frameStepCleanupMs;
+        sample.finalizeMs = runner->frameStepFinalizeMs;
+        sample.drawInstancesMs = runner->frameDrawInstancesMs;
+        sample.battleReplayMs = runner->frameDrawBattleReplayMs;
+        sample.renderMs = renderMs;
+        sample.topStepObjectIndex = runner->frameStepTopObjectIndex;
+        sample.topStepObjectMs = runner->frameStepTopObjectMs;
+        sample.topStepObjectCalls = runner->frameStepTopObjectCalls;
+    }
+    sample.spriteDrawCalls = N3DSRenderer_getFrameSpriteDrawCalls(renderer);
+    sample.spritePartDrawCalls = N3DSRenderer_getFrameSpritePartDrawCalls(renderer);
+    sample.c2dFlushes = N3DSRenderer_getFrameC2DFlushes(renderer);
+    return sample;
+}
+
+static void N3DSDustPerf_appendSample(N3DSDustPerfSampler* sampler, const N3DSDustPerfFrame* sample) {
+    if (sampler == NULL || sample == NULL) return;
+    if (sampler->sampleCount >= N3DS_DUST_PERF_MAX_FRAMES) {
+        sampler->truncated = true;
+        return;
+    }
+    sampler->samples[sampler->sampleCount++] = *sample;
+}
+
+static void N3DSDustPerf_pushPreFrame(N3DSDustPerfSampler* sampler, const N3DSDustPerfFrame* sample) {
+    if (sampler == NULL || sample == NULL) return;
+    N3DSDustPerfFrame copy = *sample;
+    copy.phase = -1;
+    sampler->preFrames[sampler->preWrite] = copy;
+    sampler->preWrite = (sampler->preWrite + 1u) % N3DS_DUST_PERF_PRE_FRAMES;
+    if (sampler->preCount < N3DS_DUST_PERF_PRE_FRAMES) sampler->preCount++;
+}
+
+static void N3DSDustPerf_copyPreFrames(N3DSDustPerfSampler* sampler) {
+    if (sampler == NULL || sampler->preCount == 0) return;
+    uint32_t start = sampler->preCount < N3DS_DUST_PERF_PRE_FRAMES ? 0u : sampler->preWrite;
+    repeat(sampler->preCount, i) {
+        uint32_t index = (start + (uint32_t) i) % N3DS_DUST_PERF_PRE_FRAMES;
+        N3DSDustPerf_appendSample(sampler, &sampler->preFrames[index]);
+    }
+}
+
+static const char* N3DSDustPerf_phaseName(int32_t phase) {
+    if (phase < 0) return "pre";
+    if (phase > 0) return "dust";
+    return "post";
+}
+
+static void N3DSDustPerf_writeEvent(N3DSDustPerfSampler* sampler, Runner* runner) {
+    if (sampler == NULL || sampler->sampleCount == 0) return;
+    FILE* file = fopen(N3DS_DUST_PERF_LOG_PATH, "a");
+    if (file == NULL) {
+        fprintf(stderr, "N3DS dust perf: failed to open %s\n", N3DS_DUST_PERF_LOG_PATH);
+        return;
+    }
+
+    fprintf(file, "# dust-event %lu samples=%lu truncated=%d\n",
+        (unsigned long) sampler->eventId, (unsigned long) sampler->sampleCount, sampler->truncated ? 1 : 0);
+    fputs(
+        "frame,phase,dust,created,destroyed,draw_instances,step_ms,prep_ms,event_ms,motion_ms,"
+        "collision_ms,cleanup_ms,finalize_ms,draw_instances_ms,battle_replay_ms,render_ms,"
+        "sprite_calls,part_calls,c2d_flushes,top_step_object,top_step_name,top_step_ms,top_step_calls\n", file);
+
+    repeat(sampler->sampleCount, i) {
+        const N3DSDustPerfFrame* sample = &sampler->samples[i];
+        const char* topName = "";
+        if (runner != NULL && sample->topStepObjectIndex >= 0 &&
+            (uint32_t) sample->topStepObjectIndex < runner->dataWin->objt.count) {
+            const char* candidate = runner->dataWin->objt.objects[sample->topStepObjectIndex].name;
+            if (candidate != NULL) topName = candidate;
+        }
+
+        fprintf(file,
+            "%ld,%s,%lu,%lu,%lu,%lu,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,"
+            "%lu,%lu,%lu,%ld,%s,%.3f,%lu\n",
+            (long) sample->frame, N3DSDustPerf_phaseName(sample->phase),
+            (unsigned long) sample->dustCount, (unsigned long) sample->instancesCreated,
+            (unsigned long) sample->instancesDestroyed, (unsigned long) sample->drawInstances,
+            sample->stepMs, sample->prepMs, sample->eventMs, sample->motionMs, sample->collisionMs,
+            sample->cleanupMs, sample->finalizeMs, sample->drawInstancesMs, sample->battleReplayMs,
+            sample->renderMs, (unsigned long) sample->spriteDrawCalls,
+            (unsigned long) sample->spritePartDrawCalls, (unsigned long) sample->c2dFlushes,
+            (long) sample->topStepObjectIndex, topName, sample->topStepObjectMs,
+            (unsigned long) sample->topStepObjectCalls);
+    }
+    fputs("# end dust-event\n", file);
+    fclose(file);
+}
+
+static void N3DSDustPerf_update(N3DSDustPerfSampler* sampler, Runner* runner, Renderer* renderer, double stepMs, double renderMs) {
+    if (sampler == NULL || runner == NULL || renderer == NULL) return;
+    N3DSDustPerfFrame sample = N3DSDustPerf_captureFrame(runner, renderer, stepMs, renderMs);
+
+    if (!sampler->active) {
+        if (sample.dustCount == 0) {
+            N3DSDustPerf_pushPreFrame(sampler, &sample);
+            return;
+        }
+        sampler->active = true;
+        sampler->truncated = false;
+        sampler->sampleCount = 0;
+        sampler->postFramesRemaining = N3DS_DUST_PERF_POST_FRAMES;
+        sampler->eventId++;
+        N3DSDustPerf_copyPreFrames(sampler);
+        sample.phase = 1;
+        N3DSDustPerf_appendSample(sampler, &sample);
+        return;
+    }
+
+    sample.phase = sample.dustCount > 0 ? 1 : 0;
+    N3DSDustPerf_appendSample(sampler, &sample);
+    if (sample.dustCount > 0) {
+        sampler->postFramesRemaining = N3DS_DUST_PERF_POST_FRAMES;
+        return;
+    }
+    if (sampler->postFramesRemaining > 0) sampler->postFramesRemaining--;
+    if (sampler->postFramesRemaining > 0) return;
+
+    N3DSDustPerf_writeEvent(sampler, runner);
+    sampler->active = false;
+    sampler->truncated = false;
+    sampler->sampleCount = 0;
+    sampler->preCount = 0;
+    sampler->preWrite = 0;
+}
+
+static void N3DSDustPerf_flushPending(N3DSDustPerfSampler* sampler, Runner* runner) {
+    if (sampler == NULL || !sampler->active || sampler->sampleCount == 0) return;
+    N3DSDustPerf_writeEvent(sampler, runner);
+    sampler->active = false;
+    sampler->sampleCount = 0;
 }
 
 static void N3DSDebugMonitor_init(N3DSDebugMonitor* monitor) {
@@ -1658,7 +1852,9 @@ int main(int argc, char** argv) {
         syncKey(runner->keyboard, &lHeld, VK_PAGEDOWN, (held & KEY_L) && !debugWarpToAsriel);
         syncKey(runner->keyboard, &rHeld, VK_PAGEUP, (held & KEY_R));
 
+        u64 stepStartTick = svcGetSystemTick();
         Runner_step(runner);
+        double frameStepMs = N3DSPerf_ticksToMs(svcGetSystemTick() - stepStartTick);
         N3DS_tryTriggerAsrielLed(runner);
         runner->audioSystem->vtable->update(runner->audioSystem, 1.0f / 30.0f);
         N3DS_refreshRoomBorderSprite(runner->currentRoom, &roomBorder, &roomBorderSheet, &haveRoomBorder, loadedRoomBorderAsset, sizeof(loadedRoomBorderAsset));
@@ -1666,7 +1862,7 @@ int main(int argc, char** argv) {
         float displayScaleX = 1.0f;
         float displayScaleY = 1.0f;
         Runner_computeViewDisplayScale(runner, gameW, gameH, &displayScaleX, &displayScaleY);
-        u64 renderStartMs = osGetTime();
+        u64 renderStartTick = svcGetSystemTick();
         C3D_FrameBegin(0);
         renderer->vtable->beginFrame(renderer, gameW, gameH, 400, 240);
         Runner_drawViews(runner, gameW, gameH, displayScaleX, displayScaleY, false);
@@ -1678,11 +1874,15 @@ int main(int argc, char** argv) {
         }
         renderer->vtable->endFrame(renderer);
         C3D_FrameEnd(0);
-        N3DSDebugMonitor_tickFrame(&debugMonitor, (double) (osGetTime() - renderStartMs));
+        double frameRenderMs = N3DSPerf_ticksToMs(svcGetSystemTick() - renderStartTick);
+        N3DSDebugMonitor_tickFrame(&debugMonitor, frameRenderMs);
+        N3DSDustPerf_update(&gN3DSDustPerfSampler, runner, renderer, frameStepMs, frameRenderMs);
 
         RunnerKeyboard_beginFrame(runner->keyboard);
         if (touchState.tapPulseFrames > 0u) touchState.tapPulseFrames--;
     }
+
+    N3DSDustPerf_flushPending(&gN3DSDustPerfSampler, runner);
 
     audioSystem->vtable->destroy(audioSystem);
     renderer->vtable->destroy(renderer);

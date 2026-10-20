@@ -356,6 +356,7 @@ typedef struct N3DSRenderer {
     uint32_t frameTextureSwitches;
     uint32_t frameTextGlyphDraws;
     uint32_t frameTextTenthsMs;
+    uint32_t frameC2DFlushes;
     uint32_t pendingC2DDraws;
     bool atlasLoaded;
     char startupError[160];
@@ -807,6 +808,7 @@ static void N3DSRenderer_resetFramePerfCounters(N3DSRenderer* renderer) {
     renderer->frameTextureSwitches = 0;
     renderer->frameTextGlyphDraws = 0;
     renderer->frameTextTenthsMs = 0;
+    renderer->frameC2DFlushes = 0;
     renderer->pendingC2DDraws = 0;
     renderer->lastDrawTexture = NULL;
     renderer->lastDirectTPAGIndex = -1;
@@ -2013,6 +2015,7 @@ static void N3DSRenderer_setDefaultGPUState(N3DSRenderer* renderer) {
 static void N3DSRenderer_flushC2DQueue(N3DSRenderer* renderer) {
     if (renderer == NULL || renderer->pendingC2DDraws == 0) return;
     C2D_Flush();
+    renderer->frameC2DFlushes++;
     renderer->pendingC2DDraws = 0;
     renderer->lastDrawTexture = NULL;
 }
@@ -3612,6 +3615,7 @@ static void N3DSRenderer_endFrame(MAYBE_UNUSED Renderer* base) {
     N3DSRenderer_logPerfWindowIfNeeded(renderer);
     N3DSRenderer_flushC2DQueue(renderer);
     C2D_Flush();
+    renderer->frameC2DFlushes++;
     renderer->pendingC2DDraws = 0;
     renderer->lastDrawTexture = NULL;
 }
@@ -5652,6 +5656,11 @@ uint32_t N3DSRenderer_getFrameTextGlyphDraws(Renderer* base) {
 uint32_t N3DSRenderer_getFrameTextTenthsMs(Renderer* base) {
     if (base == NULL) return 0;
     return ((N3DSRenderer*) base)->frameTextTenthsMs;
+}
+
+uint32_t N3DSRenderer_getFrameC2DFlushes(Renderer* base) {
+    if (base == NULL) return 0;
+    return ((N3DSRenderer*) base)->frameC2DFlushes;
 }
 
 int32_t N3DSRenderer_findTileEntryIndex(Renderer* base, int32_t backgroundIndex, int32_t srcX, int32_t srcY, int32_t srcW, int32_t srcH) {
