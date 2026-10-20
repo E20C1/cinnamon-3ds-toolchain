@@ -475,6 +475,12 @@ typedef struct Runner {
     int32_t frameStepTopObjectIndex;
     double* frameStepObjectMsByObject;
     uint32_t* frameStepObjectCallsByObject;
+#ifdef __3DS__
+    // Immutable classification caches keyed by DataWin object/sprite index.
+    // They replace repeated hierarchy strcmp/strstr scans in the 3DS battle draw path.
+    uint32_t* n3dsObjectTraits;
+    uint16_t* n3dsSpriteTraits;
+#endif
     bool n3dsDrawBattleStateValid;
     bool n3dsDrawBattleActive;
     bool n3dsDrawDodgingBullets;

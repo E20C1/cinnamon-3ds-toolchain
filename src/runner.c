@@ -107,6 +107,30 @@ static const float k3DSBottomBattleFieldScale = 2.0f;
 static const float k3DSBottomBattleFieldYOffset = -60.0f;
 static const float k3DSTopBattleEnemyInstanceYOffset = 112.0f;
 
+enum {
+    N3DS_OBJ_TRAIT_LIVE_BORDER        = 1u << 0,
+    N3DS_OBJ_TRAIT_BATTLE_CONTROLLER  = 1u << 1,
+    N3DS_OBJ_TRAIT_TOP_DIALOGUE       = 1u << 2,
+    N3DS_OBJ_TRAIT_BATTLE_WRITER      = 1u << 3,
+    N3DS_OBJ_TRAIT_BATTLE_BACKDROP    = 1u << 4,
+    N3DS_OBJ_TRAIT_BATTLE_UI          = 1u << 5,
+    N3DS_OBJ_TRAIT_FIELD_ALWAYS       = 1u << 6,
+    N3DS_OBJ_TRAIT_FIELD_DODGE        = 1u << 7,
+    N3DS_OBJ_TRAIT_FIELD_BACK         = 1u << 8,
+    N3DS_OBJ_TRAIT_ASRIEL             = 1u << 9,
+    N3DS_OBJ_TRAIT_UNDYNE             = 1u << 10,
+};
+
+enum {
+    N3DS_SPR_TRAIT_BATTLE_BACKDROP = 1u << 0,
+    N3DS_SPR_TRAIT_BULLET          = 1u << 1,
+    N3DS_SPR_TRAIT_HEART           = 1u << 2,
+    N3DS_SPR_TRAIT_SOUL            = 1u << 3,
+    N3DS_SPR_TRAIT_BORDER          = 1u << 4,
+    N3DS_SPR_TRAIT_ASRIEL          = 1u << 5,
+    N3DS_SPR_TRAIT_UNDYNE          = 1u << 6,
+};
+
 static bool Runner_stringContainsToken(const char* haystack, const char* needle) {
     return haystack != NULL && needle != NULL && strstr(haystack, needle) != NULL;
 }
@@ -114,6 +138,9 @@ static bool Runner_stringContainsToken(const char* haystack, const char* needle)
 static bool Runner_is3DSValidObjectIndex(Runner* runner, int32_t objectIndex);
 static bool Runner_objectMatches3DSNameInHierarchy(Runner* runner, int32_t objectIndex, const char* name);
 static bool Runner_objectContains3DSTokenInHierarchy(Runner* runner, int32_t objectIndex, const char* needle);
+static uint32_t Runner_get3DSObjectTraits(Runner* runner, int32_t objectIndex);
+static uint16_t Runner_get3DSSpriteTraits(Runner* runner, int32_t spriteIndex);
+static void Runner_build3DSClassificationCaches(Runner* runner);
 static bool Runner_is3DSLiveBattleBorderObject(Runner* runner, Instance* inst);
 static bool Runner_shouldHideOn3DSTopScreen(Runner* runner, Instance* inst);
 static bool Runner_is3DSBattleBackdropInstance(Runner* runner, Instance* inst);
@@ -177,23 +204,16 @@ static void Runner_prepare3DSDrawBattleState(Runner* runner) {
         repeat(instanceCount, i) {
             Instance* inst = runner->instances[i];
             if (inst == NULL || inst->destroyed || !inst->active) continue;
-            if (Runner_is3DSLiveBattleBorderObject(runner, inst)) {
-                if (inst->visible) hasLiveBattleBorder = true;
-            }
-            if (inst->visible &&
-                Runner_is3DSValidObjectIndex(runner, inst->objectIndex) &&
+            uint32_t objectTraits = Runner_get3DSObjectTraits(runner, inst->objectIndex);
+            if ((objectTraits & N3DS_OBJ_TRAIT_LIVE_BORDER) != 0 && inst->visible) hasLiveBattleBorder = true;
+            if (inst->visible && Runner_is3DSValidObjectIndex(runner, inst->objectIndex) &&
                 !Runner_is3DSBattleBackdropInstance(runner, inst)) {
-                if (Runner_objectContains3DSTokenInHierarchy(runner, inst->objectIndex, "asriel")) {
+                if ((objectTraits & N3DS_OBJ_TRAIT_ASRIEL) != 0 ||
+                    (Runner_get3DSSpriteTraits(runner, inst->spriteIndex) & N3DS_SPR_TRAIT_ASRIEL) != 0) {
                     runner->n3dsDrawAsrielBattle = true;
-                } else if (inst->spriteIndex >= 0 && (uint32_t) inst->spriteIndex < runner->dataWin->sprt.count) {
-                    const char* spriteName = runner->dataWin->sprt.sprites[inst->spriteIndex].name;
-                    if (Runner_stringContainsToken(spriteName, "asriel")) {
-                        runner->n3dsDrawAsrielBattle = true;
-                    }
                 }
             }
-            if (Runner_is3DSValidObjectIndex(runner, inst->objectIndex) &&
-                Runner_objectMatches3DSNameInHierarchy(runner, inst->objectIndex, "obj_battlecontroller") &&
+            if ((objectTraits & N3DS_OBJ_TRAIT_BATTLE_CONTROLLER) != 0 &&
                 ((int32_t) Runner_get3DSInstanceRealVar(runner, inst, "drawrect") == 1 ||
                  (int32_t) Runner_get3DSInstanceRealVar(runner, inst, "drawbinfo") == 1)) {
                 hasActiveBattleController = true;
@@ -208,13 +228,7 @@ static void Runner_prepare3DSDrawBattleState(Runner* runner) {
 
 static bool Runner_is3DSLiveBattleBorderObject(Runner* runner, Instance* inst) {
     if (runner == NULL || inst == NULL) return false;
-    if (!Runner_is3DSValidObjectIndex(runner, inst->objectIndex)) return false;
-
-    return Runner_objectMatches3DSNameInHierarchy(runner, inst->objectIndex, "obj_uborder") ||
-        Runner_objectMatches3DSNameInHierarchy(runner, inst->objectIndex, "obj_dborder") ||
-        Runner_objectMatches3DSNameInHierarchy(runner, inst->objectIndex, "obj_lborder") ||
-        Runner_objectMatches3DSNameInHierarchy(runner, inst->objectIndex, "obj_rborder") ||
-        Runner_objectMatches3DSNameInHierarchy(runner, inst->objectIndex, "obj_blackborderer");
+    return (Runner_get3DSObjectTraits(runner, inst->objectIndex) & N3DS_OBJ_TRAIT_LIVE_BORDER) != 0;
 }
 
 static bool Runner_is3DSBattleActive(Runner* runner) {
@@ -258,6 +272,101 @@ static bool Runner_objectContains3DSTokenInHierarchy(Runner* runner, int32_t obj
     return false;
 }
 
+static uint32_t Runner_get3DSObjectTraits(Runner* runner, int32_t objectIndex) {
+    if (!Runner_is3DSValidObjectIndex(runner, objectIndex) || runner->n3dsObjectTraits == NULL) return 0;
+    return runner->n3dsObjectTraits[objectIndex];
+}
+
+static uint16_t Runner_get3DSSpriteTraits(Runner* runner, int32_t spriteIndex) {
+    if (runner == NULL || runner->dataWin == NULL || runner->n3dsSpriteTraits == NULL ||
+        spriteIndex < 0 || (uint32_t) spriteIndex >= runner->dataWin->sprt.count) return 0;
+    return runner->n3dsSpriteTraits[spriteIndex];
+}
+
+static uint32_t Runner_compute3DSObjectTraits(Runner* runner, int32_t objectIndex) {
+    uint32_t traits = 0;
+    int32_t depth = 0;
+    while (Runner_is3DSValidObjectIndex(runner, objectIndex) && depth < 64) {
+        const char* name = Runner_get3DSObjectName(runner, objectIndex);
+        if (name != NULL) {
+            bool isBattleController = strcmp(name, "obj_battlecontroller") == 0;
+            bool isLiveBorder =
+                strcmp(name, "obj_uborder") == 0 || strcmp(name, "obj_dborder") == 0 ||
+                strcmp(name, "obj_lborder") == 0 || strcmp(name, "obj_rborder") == 0 ||
+                strcmp(name, "obj_blackborderer") == 0;
+            bool isBattleWriter =
+                strcmp(name, "obj_writer") == 0 || strcmp(name, "obj_writer_quiz") == 0 ||
+                strcmp(name, "obj_healwriter") == 0 || strcmp(name, "OBJ_WRITER") == 0 ||
+                strcmp(name, "OBJ_NOMSCWRITER") == 0;
+            bool isTopDialogue =
+                Runner_stringContainsToken(name, "blcon") || strcmp(name, "obj_blconsm") == 0 ||
+                strcmp(name, "obj_blconwdflowey") == 0 || strcmp(name, "obj_blconwideslave") == 0;
+            bool isUiNamed =
+                isBattleController || isLiveBorder ||
+                strcmp(name, "obj_fightbt") == 0 || strcmp(name, "obj_itembt") == 0 ||
+                strcmp(name, "obj_sparebt") == 0 || strcmp(name, "obj_talkbt") == 0 ||
+                strcmp(name, "obj_anybt") == 0 || strcmp(name, "obj_hpname") == 0 ||
+                strcmp(name, "obj_dbulletcontroller") == 0 || strcmp(name, "obj_sinefi") == 0 ||
+                strcmp(name, "obj_tensionbar") == 0 || isBattleWriter;
+            bool hasBorder = Runner_stringContainsToken(name, "border");
+            bool hasBullet = Runner_stringContainsToken(name, "bullet");
+            bool hasHeart = Runner_stringContainsToken(name, "heart");
+            bool hasSoul = Runner_stringContainsToken(name, "soul");
+
+            if (isLiveBorder) traits |= N3DS_OBJ_TRAIT_LIVE_BORDER;
+            if (isBattleController) traits |= N3DS_OBJ_TRAIT_BATTLE_CONTROLLER;
+            if (isTopDialogue) traits |= N3DS_OBJ_TRAIT_TOP_DIALOGUE;
+            if (isBattleWriter) traits |= N3DS_OBJ_TRAIT_BATTLE_WRITER;
+            if (strcmp(name, "obj_battlebg") == 0 || Runner_stringContainsToken(name, "battlebg") ||
+                Runner_stringContainsToken(name, "gridfriend")) traits |= N3DS_OBJ_TRAIT_BATTLE_BACKDROP;
+            if (isUiNamed || hasBorder || hasBullet || hasHeart || hasSoul) traits |= N3DS_OBJ_TRAIT_BATTLE_UI;
+            if (strcmp(name, "obj_blackborderer") == 0 || strcmp(name, "obj_uborder") == 0 ||
+                strcmp(name, "obj_dborder") == 0 || strcmp(name, "obj_lborder") == 0 ||
+                strcmp(name, "obj_rborder") == 0 || strcmp(name, "obj_dbulletcontroller") == 0 ||
+                strcmp(name, "obj_sinefi") == 0 || hasBorder || hasBullet) traits |= N3DS_OBJ_TRAIT_FIELD_ALWAYS;
+            if (isBattleController || hasHeart || hasSoul) traits |= N3DS_OBJ_TRAIT_FIELD_DODGE;
+            if (isBattleController || strcmp(name, "obj_blackborderer") == 0 ||
+                strcmp(name, "obj_uborder") == 0 || strcmp(name, "obj_dborder") == 0 ||
+                strcmp(name, "obj_lborder") == 0 || strcmp(name, "obj_rborder") == 0 || hasBorder) {
+                traits |= N3DS_OBJ_TRAIT_FIELD_BACK;
+            }
+            if (Runner_stringContainsToken(name, "asriel")) traits |= N3DS_OBJ_TRAIT_ASRIEL;
+            if (Runner_stringContainsToken(name, "undyne")) traits |= N3DS_OBJ_TRAIT_UNDYNE;
+        }
+        objectIndex = runner->dataWin->objt.objects[objectIndex].parentId;
+        depth++;
+    }
+    return traits;
+}
+
+static uint16_t Runner_compute3DSSpriteTraits(Sprite* sprite) {
+    if (sprite == NULL) return 0;
+    uint16_t traits = 0;
+    const char* name = sprite->name;
+    if (Runner_stringContainsToken(name, "battlebg") || Runner_stringContainsToken(name, "gridfriend") ||
+        sprite->width >= 320 || sprite->height >= 240) traits |= N3DS_SPR_TRAIT_BATTLE_BACKDROP;
+    if (Runner_stringContainsToken(name, "bullet")) traits |= N3DS_SPR_TRAIT_BULLET;
+    if (Runner_stringContainsToken(name, "heart")) traits |= N3DS_SPR_TRAIT_HEART;
+    if (Runner_stringContainsToken(name, "soul")) traits |= N3DS_SPR_TRAIT_SOUL;
+    if (Runner_stringContainsToken(name, "border")) traits |= N3DS_SPR_TRAIT_BORDER;
+    if (Runner_stringContainsToken(name, "asriel")) traits |= N3DS_SPR_TRAIT_ASRIEL;
+    if (Runner_stringContainsToken(name, "undyne")) traits |= N3DS_SPR_TRAIT_UNDYNE;
+    return traits;
+}
+
+static void Runner_build3DSClassificationCaches(Runner* runner) {
+    if (runner == NULL || runner->dataWin == NULL) return;
+    uint32_t objectCount = runner->dataWin->objt.count;
+    uint32_t spriteCount = runner->dataWin->sprt.count;
+    if (objectCount > 0) {
+        runner->n3dsObjectTraits = safeCalloc(objectCount, sizeof(uint32_t));
+        repeat(objectCount, i) runner->n3dsObjectTraits[i] = Runner_compute3DSObjectTraits(runner, (int32_t) i);
+    }
+    if (spriteCount > 0) {
+        runner->n3dsSpriteTraits = safeCalloc(spriteCount, sizeof(uint16_t));
+        repeat(spriteCount, i) runner->n3dsSpriteTraits[i] = Runner_compute3DSSpriteTraits(&runner->dataWin->sprt.sprites[i]);
+    }
+}
 static bool Runner_is3DSInstanceInsideBattleField(Runner* runner, Instance* inst) {
     if (runner == NULL || inst == NULL) return false;
 
@@ -297,12 +406,7 @@ static bool Runner_shouldCull3DSBottomBattleFieldInstance(Runner* runner, Instan
 }
 
 static bool Runner_is3DSTopEnemyDialogueObjectIndex(Runner* runner, int32_t objectIndex) {
-    if (!Runner_is3DSValidObjectIndex(runner, objectIndex)) return false;
-
-    return Runner_objectContains3DSTokenInHierarchy(runner, objectIndex, "blcon") ||
-        Runner_objectMatches3DSNameInHierarchy(runner, objectIndex, "obj_blconsm") ||
-        Runner_objectMatches3DSNameInHierarchy(runner, objectIndex, "obj_blconwdflowey") ||
-        Runner_objectMatches3DSNameInHierarchy(runner, objectIndex, "obj_blconwideslave");
+    return (Runner_get3DSObjectTraits(runner, objectIndex) & N3DS_OBJ_TRAIT_TOP_DIALOGUE) != 0;
 }
 
 static bool Runner_is3DSTopEnemyDialogueObject(Runner* runner, Instance* inst) {
@@ -311,13 +415,7 @@ static bool Runner_is3DSTopEnemyDialogueObject(Runner* runner, Instance* inst) {
 }
 
 static bool Runner_is3DSBattleWriterObjectIndex(Runner* runner, int32_t objectIndex) {
-    if (!Runner_is3DSValidObjectIndex(runner, objectIndex)) return false;
-
-    return Runner_objectMatches3DSNameInHierarchy(runner, objectIndex, "obj_writer") ||
-        Runner_objectMatches3DSNameInHierarchy(runner, objectIndex, "obj_writer_quiz") ||
-        Runner_objectMatches3DSNameInHierarchy(runner, objectIndex, "obj_healwriter") ||
-        Runner_objectMatches3DSNameInHierarchy(runner, objectIndex, "OBJ_WRITER") ||
-        Runner_objectMatches3DSNameInHierarchy(runner, objectIndex, "OBJ_NOMSCWRITER");
+    return (Runner_get3DSObjectTraits(runner, objectIndex) & N3DS_OBJ_TRAIT_BATTLE_WRITER) != 0;
 }
 
 static bool Runner_has3DSTopEnemyDialogue(Runner* runner, Drawable* drawables, int32_t drawableCount) {
@@ -337,27 +435,8 @@ static bool Runner_has3DSTopEnemyDialogue(Runner* runner, Drawable* drawables, i
 
 static bool Runner_is3DSBattleBackdropInstance(Runner* runner, Instance* inst) {
     if (runner == NULL || inst == NULL) return false;
-
-    if (Runner_objectMatches3DSNameInHierarchy(runner, inst->objectIndex, "obj_battlebg") ||
-        Runner_objectContains3DSTokenInHierarchy(runner, inst->objectIndex, "battlebg") ||
-        Runner_objectContains3DSTokenInHierarchy(runner, inst->objectIndex, "gridfriend")) {
-        return true;
-    }
-
-    if (inst->spriteIndex < 0 || (uint32_t) inst->spriteIndex >= runner->dataWin->sprt.count) {
-        return false;
-    }
-
-    Sprite* sprite = &runner->dataWin->sprt.sprites[inst->spriteIndex];
-    const char* spriteName = sprite->name;
-    if (Runner_stringContainsToken(spriteName, "battlebg") ||
-        Runner_stringContainsToken(spriteName, "gridfriend")) {
-        return true;
-    }
-
-    // Treat room-sized battle backdrops as non-enemy scenery so the enemy-only
-    // top-screen offset doesn't drag the whole scene downward.
-    return sprite->width >= 320 || sprite->height >= 240;
+    if ((Runner_get3DSObjectTraits(runner, inst->objectIndex) & N3DS_OBJ_TRAIT_BATTLE_BACKDROP) != 0) return true;
+    return (Runner_get3DSSpriteTraits(runner, inst->spriteIndex) & N3DS_SPR_TRAIT_BATTLE_BACKDROP) != 0;
 }
 
 static bool Runner_shouldOffset3DSTopBattleInstance(Runner* runner, Instance* inst) {
@@ -377,52 +456,13 @@ static bool Runner_is3DSBattleUIObject(Runner* runner, Instance* inst) {
     if (!Runner_is3DSValidObjectIndex(runner, inst->objectIndex)) return false;
     Runner_prepare3DSDrawBattleState(runner);
     if (!runner->n3dsDrawBattleActive) return false;
-    if (Runner_is3DSTopEnemyDialogueObjectIndex(runner, inst->objectIndex)) return false;
-    if (runner->n3dsDrawHasTopEnemyDialogue && Runner_is3DSBattleWriterObjectIndex(runner, inst->objectIndex)) return false;
-
-    const char* objectName = Runner_get3DSObjectName(runner, inst->objectIndex);
-    if (objectName == NULL) return false;
-
-    if (
-        Runner_objectMatches3DSNameInHierarchy(runner, inst->objectIndex, "obj_battlecontroller") ||
-        Runner_objectMatches3DSNameInHierarchy(runner, inst->objectIndex, "obj_blackborderer") ||
-        Runner_objectMatches3DSNameInHierarchy(runner, inst->objectIndex, "obj_uborder") ||
-        Runner_objectMatches3DSNameInHierarchy(runner, inst->objectIndex, "obj_dborder") ||
-        Runner_objectMatches3DSNameInHierarchy(runner, inst->objectIndex, "obj_lborder") ||
-        Runner_objectMatches3DSNameInHierarchy(runner, inst->objectIndex, "obj_rborder") ||
-        Runner_objectMatches3DSNameInHierarchy(runner, inst->objectIndex, "obj_fightbt") ||
-        Runner_objectMatches3DSNameInHierarchy(runner, inst->objectIndex, "obj_itembt") ||
-        Runner_objectMatches3DSNameInHierarchy(runner, inst->objectIndex, "obj_sparebt") ||
-        Runner_objectMatches3DSNameInHierarchy(runner, inst->objectIndex, "obj_talkbt") ||
-        Runner_objectMatches3DSNameInHierarchy(runner, inst->objectIndex, "obj_anybt") ||
-        Runner_objectMatches3DSNameInHierarchy(runner, inst->objectIndex, "obj_hpname") ||
-        Runner_objectMatches3DSNameInHierarchy(runner, inst->objectIndex, "obj_dbulletcontroller") ||
-        Runner_objectMatches3DSNameInHierarchy(runner, inst->objectIndex, "obj_sinefi") ||
-        Runner_objectMatches3DSNameInHierarchy(runner, inst->objectIndex, "obj_tensionbar") ||
-        Runner_is3DSBattleWriterObjectIndex(runner, inst->objectIndex)) {
-        return true;
-    }
-
-    if (Runner_objectContains3DSTokenInHierarchy(runner, inst->objectIndex, "border") ||
-        Runner_objectContains3DSTokenInHierarchy(runner, inst->objectIndex, "bullet") ||
-        Runner_objectContains3DSTokenInHierarchy(runner, inst->objectIndex, "heart") ||
-        Runner_objectContains3DSTokenInHierarchy(runner, inst->objectIndex, "soul")) {
-        return true;
-    }
-
-    if (inst->spriteIndex >= 0 && (uint32_t) inst->spriteIndex < runner->dataWin->sprt.count) {
-        const char* spriteName = runner->dataWin->sprt.sprites[inst->spriteIndex].name;
-        if (Runner_stringContainsToken(spriteName, "bullet") ||
-            Runner_stringContainsToken(spriteName, "heart") ||
-            Runner_stringContainsToken(spriteName, "soul")) {
-            return true;
-        }
-    }
-
-    if (runner->n3dsDrawDodgingBullets && Runner_is3DSInstanceInsideBattleField(runner, inst)) {
-        return true;
-    }
-
+    uint32_t objectTraits = Runner_get3DSObjectTraits(runner, inst->objectIndex);
+    if ((objectTraits & N3DS_OBJ_TRAIT_TOP_DIALOGUE) != 0) return false;
+    if (runner->n3dsDrawHasTopEnemyDialogue && (objectTraits & N3DS_OBJ_TRAIT_BATTLE_WRITER) != 0) return false;
+    if ((objectTraits & N3DS_OBJ_TRAIT_BATTLE_UI) != 0) return true;
+    uint16_t spriteTraits = Runner_get3DSSpriteTraits(runner, inst->spriteIndex);
+    if ((spriteTraits & (N3DS_SPR_TRAIT_BULLET | N3DS_SPR_TRAIT_HEART | N3DS_SPR_TRAIT_SOUL)) != 0) return true;
+    if (runner->n3dsDrawDodgingBullets && Runner_is3DSInstanceInsideBattleField(runner, inst)) return true;
     return false;
 }
 
@@ -432,69 +472,20 @@ static bool Runner_is3DSBattleFieldObject(Runner* runner, Instance* inst) {
     Runner_prepare3DSDrawBattleState(runner);
     if (!runner->n3dsDrawBattleActive) return false;
     bool isDodgingBullets = runner->n3dsDrawDodgingBullets;
-
-    if ((isDodgingBullets &&
-            Runner_objectMatches3DSNameInHierarchy(runner, inst->objectIndex, "obj_battlecontroller")) ||
-        Runner_objectMatches3DSNameInHierarchy(runner, inst->objectIndex, "obj_blackborderer") ||
-        Runner_objectMatches3DSNameInHierarchy(runner, inst->objectIndex, "obj_uborder") ||
-        Runner_objectMatches3DSNameInHierarchy(runner, inst->objectIndex, "obj_dborder") ||
-        Runner_objectMatches3DSNameInHierarchy(runner, inst->objectIndex, "obj_lborder") ||
-        Runner_objectMatches3DSNameInHierarchy(runner, inst->objectIndex, "obj_rborder") ||
-        Runner_objectMatches3DSNameInHierarchy(runner, inst->objectIndex, "obj_dbulletcontroller") ||
-        Runner_objectMatches3DSNameInHierarchy(runner, inst->objectIndex, "obj_sinefi")) {
-        return true;
-    }
-
-    if (Runner_objectContains3DSTokenInHierarchy(runner, inst->objectIndex, "border") ||
-        Runner_objectContains3DSTokenInHierarchy(runner, inst->objectIndex, "bullet") ||
-        (isDodgingBullets && (
-            Runner_objectContains3DSTokenInHierarchy(runner, inst->objectIndex, "heart") ||
-            Runner_objectContains3DSTokenInHierarchy(runner, inst->objectIndex, "soul")))) {
-        return true;
-    }
-
-    if (inst->spriteIndex >= 0 && (uint32_t) inst->spriteIndex < runner->dataWin->sprt.count) {
-        const char* spriteName = runner->dataWin->sprt.sprites[inst->spriteIndex].name;
-        if (Runner_stringContainsToken(spriteName, "bullet") ||
-            (isDodgingBullets && (
-                Runner_stringContainsToken(spriteName, "heart") ||
-                Runner_stringContainsToken(spriteName, "soul")))) {
-            return true;
-        }
-    }
-
-    if (isDodgingBullets && Runner_is3DSInstanceInsideBattleField(runner, inst)) {
-        return true;
-    }
-
+    uint32_t objectTraits = Runner_get3DSObjectTraits(runner, inst->objectIndex);
+    if ((objectTraits & N3DS_OBJ_TRAIT_FIELD_ALWAYS) != 0 ||
+        (isDodgingBullets && (objectTraits & N3DS_OBJ_TRAIT_FIELD_DODGE) != 0)) return true;
+    uint16_t spriteTraits = Runner_get3DSSpriteTraits(runner, inst->spriteIndex);
+    if ((spriteTraits & N3DS_SPR_TRAIT_BULLET) != 0 ||
+        (isDodgingBullets && (spriteTraits & (N3DS_SPR_TRAIT_HEART | N3DS_SPR_TRAIT_SOUL)) != 0)) return true;
+    if (isDodgingBullets && Runner_is3DSInstanceInsideBattleField(runner, inst)) return true;
     return false;
 }
 
 static bool Runner_is3DSBattleFieldBackLayerObject(Runner* runner, Instance* inst) {
     if (runner == NULL || inst == NULL) return false;
-    if (!Runner_is3DSValidObjectIndex(runner, inst->objectIndex)) return false;
-
-    if (Runner_objectMatches3DSNameInHierarchy(runner, inst->objectIndex, "obj_battlecontroller") ||
-        Runner_objectMatches3DSNameInHierarchy(runner, inst->objectIndex, "obj_blackborderer") ||
-        Runner_objectMatches3DSNameInHierarchy(runner, inst->objectIndex, "obj_uborder") ||
-        Runner_objectMatches3DSNameInHierarchy(runner, inst->objectIndex, "obj_dborder") ||
-        Runner_objectMatches3DSNameInHierarchy(runner, inst->objectIndex, "obj_lborder") ||
-        Runner_objectMatches3DSNameInHierarchy(runner, inst->objectIndex, "obj_rborder")) {
-        return true;
-    }
-
-    if (Runner_objectContains3DSTokenInHierarchy(runner, inst->objectIndex, "border")) {
-        return true;
-    }
-
-    if (inst->spriteIndex >= 0 && (uint32_t) inst->spriteIndex < runner->dataWin->sprt.count) {
-        const char* spriteName = runner->dataWin->sprt.sprites[inst->spriteIndex].name;
-        if (Runner_stringContainsToken(spriteName, "border")) {
-            return true;
-        }
-    }
-
-    return false;
+    if ((Runner_get3DSObjectTraits(runner, inst->objectIndex) & N3DS_OBJ_TRAIT_FIELD_BACK) != 0) return true;
+    return (Runner_get3DSSpriteTraits(runner, inst->spriteIndex) & N3DS_SPR_TRAIT_BORDER) != 0;
 }
 
 static bool Runner_is3DSAsrielBattle(Runner* runner) {
@@ -516,15 +507,9 @@ static bool Runner_is3DSUndyneBattle(Runner* runner) {
         if (!Runner_is3DSValidObjectIndex(runner, inst->objectIndex)) continue;
         if (Runner_is3DSBattleBackdropInstance(runner, inst)) continue;
 
-        if (Runner_objectContains3DSTokenInHierarchy(runner, inst->objectIndex, "undyne")) {
+        if ((Runner_get3DSObjectTraits(runner, inst->objectIndex) & N3DS_OBJ_TRAIT_UNDYNE) != 0 ||
+            (Runner_get3DSSpriteTraits(runner, inst->spriteIndex) & N3DS_SPR_TRAIT_UNDYNE) != 0) {
             return true;
-        }
-
-        if (inst->spriteIndex >= 0 && (uint32_t) inst->spriteIndex < runner->dataWin->sprt.count) {
-            const char* spriteName = runner->dataWin->sprt.sprites[inst->spriteIndex].name;
-            if (Runner_stringContainsToken(spriteName, "undyne")) {
-                return true;
-            }
         }
     }
 
@@ -3085,6 +3070,9 @@ Runner* Runner_create(DataWin* dataWin, VMContext* vm, Renderer* renderer, FileS
         runner->frameStepObjectMsByObject = safeCalloc(dataWin->objt.count, sizeof(double));
         runner->frameStepObjectCallsByObject = safeCalloc(dataWin->objt.count, sizeof(uint32_t));
     }
+#ifdef __3DS__
+    Runner_build3DSClassificationCaches(runner);
+#endif
 
     // Collision compatibility mode is "enabled" for all pre-GM 2022.1 games AND for any post-GM 2022.1 games that have the bit 27 set
     runner->collisionCompatibilityMode = (dataWin->detectedFormat.major == 1) || (((dataWin->optn.info >> 27) & 1) != 0);
@@ -4529,6 +4517,12 @@ void Runner_free(Runner* runner) {
     runner->frameStepObjectMsByObject = nullptr;
     free(runner->frameStepObjectCallsByObject);
     runner->frameStepObjectCallsByObject = nullptr;
+#ifdef __3DS__
+    free(runner->n3dsObjectTraits);
+    runner->n3dsObjectTraits = nullptr;
+    free(runner->n3dsSpriteTraits);
+    runner->n3dsSpriteTraits = nullptr;
+#endif
     ResolvedEventTable_free(&runner->eventTable);
     EventSlotMap_destroy(&runner->eventSlotMap);
     shfree(runner->assetsByName);
