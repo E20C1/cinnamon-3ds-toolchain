@@ -5622,7 +5622,7 @@ const char* N3DSRenderer_getStartupError(Renderer* base) {
     return renderer->startupError;
 }
 
-static bool N3DSRenderer_hasPackedDirectAsset(const N3DSRenderer* renderer, const char* relativePath) {
+static bool N3DSRenderer_hasPackedDirectAsset(N3DSRenderer* renderer, const char* relativePath) {
     if (renderer == NULL || relativePath == NULL || renderer->packedDirectAssetMap == NULL) return false;
     return shgeti(renderer->packedDirectAssetMap, relativePath) >= 0;
 }
