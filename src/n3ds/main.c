@@ -1032,9 +1032,10 @@ static void N3DSDustPerf_flushPending(N3DSDustPerfSampler* sampler, Runner* runn
 
 static void N3DSAttackPerf_update(
     N3DSDustPerfSampler* sampler,
+    Runner* runner,
     const N3DSDustPerfFrame* captured
 ) {
-    if (sampler == NULL || captured == NULL) return;
+    if (sampler == NULL || runner == NULL || captured == NULL) return;
     N3DSDustPerfFrame sample = *captured;
     bool targetChoiceAnimating =
         sample.targetChoiceObjectIndex >= 0 && fabsf(sample.targetChoiceImageSpeed) > 0.001f;
@@ -2094,7 +2095,7 @@ int main(int argc, char** argv) {
         N3DSDebugMonitor_tickFrame(&debugMonitor, renderPerf.totalMs);
         N3DSDustPerfFrame perfSample = N3DSDustPerf_captureFrame(runner, renderer, frameStepMs, &renderPerf);
         N3DSDustPerf_update(&gN3DSDustPerfSampler, &perfSample);
-        N3DSAttackPerf_update(&gN3DSAttackPerfSampler, &perfSample);
+        N3DSAttackPerf_update(&gN3DSAttackPerfSampler, runner, &perfSample);
 
         RunnerKeyboard_beginFrame(runner->keyboard);
         if (touchState.tapPulseFrames > 0u) touchState.tapPulseFrames--;
