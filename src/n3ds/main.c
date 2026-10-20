@@ -985,9 +985,10 @@ static void N3DSPerf_writeEvent(
 
 static void N3DSDustPerf_update(
     N3DSDustPerfSampler* sampler,
+    Runner* runner,
     const N3DSDustPerfFrame* captured
 ) {
-    if (sampler == NULL || captured == NULL) return;
+    if (sampler == NULL || runner == NULL || captured == NULL) return;
     N3DSDustPerfFrame sample = *captured;
 
     if (!sampler->active) {
@@ -2094,7 +2095,7 @@ int main(int argc, char** argv) {
 
         N3DSDebugMonitor_tickFrame(&debugMonitor, renderPerf.totalMs);
         N3DSDustPerfFrame perfSample = N3DSDustPerf_captureFrame(runner, renderer, frameStepMs, &renderPerf);
-        N3DSDustPerf_update(&gN3DSDustPerfSampler, &perfSample);
+        N3DSDustPerf_update(&gN3DSDustPerfSampler, runner, &perfSample);
         N3DSAttackPerf_update(&gN3DSAttackPerfSampler, runner, &perfSample);
 
         RunnerKeyboard_beginFrame(runner->keyboard);
