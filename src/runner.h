@@ -480,6 +480,19 @@ typedef struct Runner {
     // They replace repeated hierarchy strcmp/strstr scans in the 3DS battle draw path.
     uint32_t* n3dsObjectTraits;
     uint16_t* n3dsSpriteTraits;
+
+    // Per-frame attribution for the instance that caused the largest atlas import burst.
+    int32_t frameDrawTopImportObjectIndex;
+    uint32_t frameDrawTopImportInstanceId;
+    int32_t frameDrawTopImportInstanceSpriteIndex;
+    int32_t frameDrawTopImportInstanceSubimg;
+    int32_t frameDrawTopImportInstanceTPAGIndex;
+    int32_t frameDrawTopImportTriggerTPAGIndex;
+    uint32_t frameDrawTopImportCount;
+    uint32_t frameDrawTopImportEvictions;
+    uint32_t frameDrawTopImportPass;
+    uint32_t frameDrawTopImportPageCount;
+    uint16_t frameDrawTopImportPages[16];
 #endif
     bool n3dsDrawBattleStateValid;
     bool n3dsDrawBattleActive;
