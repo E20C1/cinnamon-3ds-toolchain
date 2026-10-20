@@ -346,6 +346,7 @@ typedef struct N3DSRenderer {
     uint32_t frameBlobReads;
     uint32_t frameDirectBlobReads;
     uint32_t framePageImports;
+    uint32_t framePageEvictions;
     uint32_t frameImportFailures;
     uint32_t frameImportEvictions;
     uint32_t frameFragmentDraws;
@@ -797,7 +798,9 @@ static double N3DSRenderer_ticksToMs(u64 ticks) {
 
 static void N3DSRenderer_resetFramePerfCounters(N3DSRenderer* renderer) {
     renderer->frameBlobReads = 0;
+    renderer->frameDirectBlobReads = 0;
     renderer->framePageImports = 0;
+    renderer->framePageEvictions = 0;
     renderer->frameImportFailures = 0;
     renderer->frameImportEvictions = 0;
     renderer->frameFragmentDraws = 0;
@@ -1448,6 +1451,7 @@ static void N3DSRenderer_unloadPage(N3DSRenderer* renderer, uint32_t pageIndex) 
     N3DSLoadedAtlasPage* page = &renderer->atlasPages[pageIndex];
     if (!page->ready) return;
     C2D_Flush();
+    renderer->frameC2DFlushes++;
     renderer->pendingC2DDraws = 0;
     renderer->lastDrawTexture = NULL;
 
@@ -1703,6 +1707,7 @@ static bool N3DSRenderer_evictLRUPage(N3DSRenderer* renderer, uint32_t excludePa
 
     if (bestIndex == UINT32_MAX) return false;
     N3DSRenderer_unloadPage(renderer, bestIndex);
+    renderer->framePageEvictions++;
     return true;
 }
 
@@ -5616,6 +5621,31 @@ uint32_t N3DSRenderer_getResidentDirectAssetVRAMBytes(Renderer* base) {
 uint32_t N3DSRenderer_getResidentDirectAssetVRAMLimitBytes(Renderer* base) {
     if (base == NULL) return 0;
     return ((N3DSRenderer*) base)->residentDirectAssetVRAMLimitBytes;
+}
+
+uint32_t N3DSRenderer_getFrameBlobReads(Renderer* base) {
+    if (base == NULL) return 0;
+    return ((N3DSRenderer*) base)->frameBlobReads;
+}
+
+uint32_t N3DSRenderer_getFrameDirectBlobReads(Renderer* base) {
+    if (base == NULL) return 0;
+    return ((N3DSRenderer*) base)->frameDirectBlobReads;
+}
+
+uint32_t N3DSRenderer_getFramePageImports(Renderer* base) {
+    if (base == NULL) return 0;
+    return ((N3DSRenderer*) base)->framePageImports;
+}
+
+uint32_t N3DSRenderer_getFramePageEvictions(Renderer* base) {
+    if (base == NULL) return 0;
+    return ((N3DSRenderer*) base)->framePageEvictions;
+}
+
+uint32_t N3DSRenderer_getFrameImportFailures(Renderer* base) {
+    if (base == NULL) return 0;
+    return ((N3DSRenderer*) base)->frameImportFailures;
 }
 
 uint32_t N3DSRenderer_getFrameFragmentDraws(Renderer* base) {
