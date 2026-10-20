@@ -1,0 +1,752 @@
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory = $true)]
+    [Alias("InputPath")]
+    [string]$DataWin,
+
+    [string]$BuildDir = "build\n3ds-cia",
+    [ValidateSet("Release", "Debug", "RelWithDebInfo", "MinSizeRel")]
+    [string]$Configuration = "Release",
+    [string]$AssetDir = "",
+
+    [string]$Preprocessor = "",
+    [string]$Tex3ds = "",
+    [string]$Makerom = "",
+    [string]$Bannertool = "",
+    [string]$DspFirm = "",
+
+    [string]$PresetId = "",
+    [string]$Title = "",
+    [string]$Description = "",
+    [string]$Author = "",
+    [string]$ProductCode = "",
+    [string]$UniqueId = "",
+    [string]$Icon = "",
+    [string]$BannerImage = "",
+    [string]$BannerAudio = "",
+
+    [switch]$DisableBottomScreen,
+    [switch]$SkipPreprocessorBuild,
+    [switch]$SkipPreprocess,
+    [switch]$KeepStaging,
+    [switch]$NoToolDownload
+)
+
+$ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
+
+$repoRoot = Split-Path -Parent $PSScriptRoot
+
+function Resolve-RepoPath {
+    param([string]$Path)
+    if ([System.IO.Path]::IsPathRooted($Path)) {
+        return [System.IO.Path]::GetFullPath($Path)
+    }
+    return [System.IO.Path]::GetFullPath((Join-Path $repoRoot $Path))
+}
+
+function Resolve-InputPath {
+    param([string]$Path)
+    if ([System.IO.Path]::IsPathRooted($Path)) {
+        return [System.IO.Path]::GetFullPath($Path)
+    }
+    return [System.IO.Path]::GetFullPath((Join-Path (Get-Location).Path $Path))
+}
+
+function Resolve-DataWinPath {
+    param([string]$Path)
+    $resolved = Resolve-InputPath -Path $Path
+    if (Test-Path -LiteralPath $resolved -PathType Container) {
+        $resolved = Join-Path $resolved "data.win"
+    }
+    if (-not (Test-Path -LiteralPath $resolved -PathType Leaf)) {
+        throw "data.win was not found: $resolved"
+    }
+    return (Resolve-Path -LiteralPath $resolved).Path
+}
+
+function Get-ExternalAudioFingerprint {
+    param([string]$DataWinPath)
+
+    $root = Split-Path -Parent $DataWinPath
+    $audioExtensions = @(".ogg", ".oga", ".wav")
+    $files = @(
+        Get-ChildItem -LiteralPath $root -Recurse -File -ErrorAction SilentlyContinue |
+            Where-Object { $audioExtensions -contains $_.Extension.ToLowerInvariant() } |
+            Sort-Object FullName
+    )
+
+    $builder = New-Object System.Text.StringBuilder
+    [int64]$totalBytes = 0
+    foreach ($file in $files) {
+        $trimChars = [char[]]@([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+        $relative = $file.FullName.Substring($root.Length).TrimStart($trimChars)
+        $relative = $relative.Replace([System.IO.Path]::DirectorySeparatorChar, [char]'/')
+        $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName).Hash.ToLowerInvariant()
+        [void]$builder.Append($relative)
+        [void]$builder.Append('|')
+        [void]$builder.Append([string]$file.Length)
+        [void]$builder.Append('|')
+        [void]$builder.Append($hash)
+        [void]$builder.Append([Environment]::NewLine)
+        $totalBytes += [int64]$file.Length
+    }
+
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($builder.ToString())
+        $digest = $sha.ComputeHash($bytes)
+        $fingerprint = ([System.BitConverter]::ToString($digest)).Replace('-', '').ToLowerInvariant()
+    }
+    finally {
+        $sha.Dispose()
+    }
+
+    return [ordered]@{
+        file_count = $files.Count
+        total_bytes = $totalBytes
+        sha256 = $fingerprint
+    }
+}
+
+function Resolve-Executable {
+    param(
+        [string]$ExplicitPath,
+        [string[]]$CommandNames,
+        [string[]]$FallbackPaths,
+        [string]$Label
+    )
+
+    if ($ExplicitPath) {
+        $candidate = if ([System.IO.Path]::IsPathRooted($ExplicitPath)) {
+            $ExplicitPath
+        } else {
+            Resolve-RepoPath -Path $ExplicitPath
+        }
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            return (Resolve-Path -LiteralPath $candidate).Path
+        }
+        $command = Get-Command $ExplicitPath -ErrorAction SilentlyContinue
+        if ($command) { return $command.Source }
+        throw "$Label was not found: $ExplicitPath"
+    }
+
+    foreach ($name in $CommandNames) {
+        $command = Get-Command $name -ErrorAction SilentlyContinue
+        if ($command) { return $command.Source }
+    }
+    foreach ($path in $FallbackPaths) {
+        if ($path -and (Test-Path -LiteralPath $path -PathType Leaf)) {
+            return (Resolve-Path -LiteralPath $path).Path
+        }
+    }
+    return $null
+}
+
+
+function Install-PinnedPackagingTool {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ToolKey
+    )
+
+    $manifestPath = Join-Path $repoRoot "resources\3ds\meta\packaging-tools.json"
+    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+        throw "Pinned packaging tool manifest was not found: $manifestPath"
+    }
+
+    $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $platform = $manifest.windows_x86_64
+    if ($null -eq $platform) {
+        throw "packaging-tools.json does not define windows_x86_64 tools."
+    }
+
+    $tool = $platform.PSObject.Properties[$ToolKey].Value
+    if ($null -eq $tool) {
+        throw "Unknown pinned packaging tool: $ToolKey"
+    }
+
+    $toolRoot = Join-Path $repoRoot ("build\tools\n3ds-packaging\{0}-{1}" -f $ToolKey, [string]$tool.version)
+    $existing = Get-ChildItem -LiteralPath $toolRoot -Recurse -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -ieq [string]$tool.executable } |
+        Select-Object -First 1 -ExpandProperty FullName
+    if ($existing) {
+        return (Resolve-Path -LiteralPath $existing).Path
+    }
+
+    New-Item -ItemType Directory -Force -Path $toolRoot | Out-Null
+    $archivePath = Join-Path $toolRoot ("{0}-{1}.zip" -f $ToolKey, [string]$tool.version)
+
+    Write-Host ""
+    Write-Host "Downloading pinned $ToolKey $($tool.version)..."
+    Write-Host "  Source: $($tool.source)"
+    Write-Host "  URL:    $($tool.url)"
+
+    try {
+        Invoke-WebRequest -Uri ([string]$tool.url) -OutFile $archivePath -UseBasicParsing
+    }
+    catch {
+        if (Test-Path -LiteralPath $archivePath) {
+            Remove-Item -LiteralPath $archivePath -Force -ErrorAction SilentlyContinue
+        }
+        throw "Failed to download $ToolKey from the pinned GitHub release: $($_.Exception.Message)"
+    }
+
+    $actualSize = (Get-Item -LiteralPath $archivePath).Length
+    $expectedSize = [int64]$tool.archive_size
+    if ($expectedSize -gt 0 -and $actualSize -ne $expectedSize) {
+        Remove-Item -LiteralPath $archivePath -Force -ErrorAction SilentlyContinue
+        throw "$ToolKey archive size verification failed. Expected $expectedSize bytes, got $actualSize bytes."
+    }
+
+    $expectedSha256 = [string]$tool.sha256
+    if ($expectedSha256) {
+        $actualSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $archivePath).Hash.ToLowerInvariant()
+        if ($actualSha256 -ne $expectedSha256.ToLowerInvariant()) {
+            Remove-Item -LiteralPath $archivePath -Force -ErrorAction SilentlyContinue
+            throw "$ToolKey SHA-256 verification failed. Expected $expectedSha256, got $actualSha256."
+        }
+    } else {
+        Write-Warning "$ToolKey release does not publish a SHA-256 digest; verified pinned URL and archive size only."
+    }
+
+    try {
+        Expand-Archive -LiteralPath $archivePath -DestinationPath $toolRoot -Force
+    }
+    finally {
+        if (Test-Path -LiteralPath $archivePath) {
+            Remove-Item -LiteralPath $archivePath -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    $executable = Get-ChildItem -LiteralPath $toolRoot -Recurse -File |
+        Where-Object { $_.Name -ieq [string]$tool.executable } |
+        Select-Object -First 1 -ExpandProperty FullName
+
+    if (-not $executable) {
+        throw "$ToolKey archive extracted successfully, but $($tool.executable) was not found under $toolRoot."
+    }
+
+    $resolved = (Resolve-Path -LiteralPath $executable).Path
+    Write-Host "  Installed: $resolved"
+    return $resolved
+}
+
+
+function Resolve-DspFirmPath {
+    param([string]$ExplicitPath)
+
+    $candidates = New-Object System.Collections.Generic.List[string]
+    if ($ExplicitPath) {
+        $candidates.Add((Resolve-InputPath -Path $ExplicitPath))
+    }
+    if ($env:N3DS_DSPFIRM) {
+        $candidates.Add((Resolve-InputPath -Path $env:N3DS_DSPFIRM))
+    }
+
+    # Convenience for users building while the 3DS SD card is mounted.
+    foreach ($drive in [System.IO.DriveInfo]::GetDrives()) {
+        try {
+            if (-not $drive.IsReady -or $drive.DriveType -ne [System.IO.DriveType]::Removable) { continue }
+            $candidates.Add((Join-Path $drive.RootDirectory.FullName "3ds\dspfirm.cdc"))
+        }
+        catch {
+        }
+    }
+
+    foreach ($candidate in $candidates) {
+        if ($candidate -and (Test-Path -LiteralPath $candidate -PathType Leaf)) {
+            $file = Get-Item -LiteralPath $candidate
+            if ($file.Length -lt 0x100 -or $file.Length -gt 0x10000) {
+                throw "dspfirm.cdc has an unexpected size ($($file.Length) bytes): $candidate"
+            }
+            return (Resolve-Path -LiteralPath $candidate).Path
+        }
+    }
+
+    return $null
+}
+
+function Get-ExistingPreprocessor {
+    param([string]$ExplicitPath)
+    if ($ExplicitPath) {
+        return Resolve-Executable -ExplicitPath $ExplicitPath -CommandNames @() -FallbackPaths @() -Label "n3ds-preprocess"
+    }
+
+    $candidates = @(
+        (Join-Path $repoRoot "build\host-n3ds-preprocess\n3ds-preprocess.exe"),
+        (Join-Path $repoRoot "build\host-n3ds-preprocess\Release\n3ds-preprocess.exe"),
+        (Join-Path $repoRoot "build\host-n3ds-preprocess\n3ds-preprocess"),
+        (Join-Path $repoRoot "build\n3ds-preprocess\n3ds-preprocess.exe"),
+        (Join-Path $repoRoot "build\n3ds-preprocess\Release\n3ds-preprocess.exe"),
+        (Join-Path $repoRoot "build\n3ds-preprocess\n3ds-preprocess")
+    )
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            return (Resolve-Path -LiteralPath $candidate).Path
+        }
+    }
+    return $null
+}
+
+function Get-SafeFileStem {
+    param([string]$Value)
+    if (-not $Value) { return "gamemaker-game" }
+    $stem = $Value.ToLowerInvariant() -replace '[^a-z0-9._-]+', '-'
+    $stem = $stem.Trim('-', '.', '_')
+    if (-not $stem) { return "gamemaker-game" }
+    if ($stem.Length -gt 48) {
+        $stem = $stem.Substring(0, 48).TrimEnd('-', '.', '_')
+    }
+    if (-not $stem) { return "gamemaker-game" }
+    return $stem
+}
+
+function Resolve-MetadataAsset {
+    param([string]$OverridePath, [string]$PresetPath, [string]$Label)
+
+    $candidate = ""
+    if ($OverridePath) {
+        $candidate = if ([System.IO.Path]::IsPathRooted($OverridePath)) {
+            $OverridePath
+        } else {
+            Resolve-InputPath -Path $OverridePath
+        }
+    } elseif ($PresetPath) {
+        $candidate = Resolve-RepoPath -Path $PresetPath
+    }
+
+    if (-not $candidate) { return $null }
+    if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) {
+        throw "$Label was not found: $candidate"
+    }
+    return (Resolve-Path -LiteralPath $candidate).Path
+}
+
+function Get-OptionalProperty {
+    param($Object, [string]$Name, $Fallback)
+    if ($null -eq $Object) { return $Fallback }
+    $property = $Object.PSObject.Properties[$Name]
+    if ($null -eq $property) { return $Fallback }
+    return $property.Value
+}
+
+function Test-GamePresetMatch {
+    param($Preset, $Metadata)
+
+    if ($null -eq $Preset -or $null -eq $Metadata -or $null -eq $Preset.match) {
+        return $false
+    }
+
+    $displayName = [string]$Metadata.display_name
+    $internalName = [string]$Metadata.name
+    $steamAppId = [int64]$Metadata.steam_app_id
+
+    foreach ($candidate in @($Preset.match.display_names)) {
+        if ($candidate -and $displayName -and $displayName -ieq [string]$candidate) { return $true }
+    }
+    foreach ($candidate in @($Preset.match.names)) {
+        if ($candidate -and $internalName -and $internalName -ieq [string]$candidate) { return $true }
+    }
+    foreach ($candidate in @($Preset.match.steam_app_ids)) {
+        if ($null -ne $candidate -and $steamAppId -ge 0 -and $steamAppId -eq [int64]$candidate) { return $true }
+    }
+
+    return $false
+}
+
+$dataWinPath = Resolve-DataWinPath -Path $DataWin
+$dspFirmPath = Resolve-DspFirmPath -ExplicitPath $DspFirm
+if (-not $dspFirmPath) {
+    throw @"
+A local dspfirm.cdc dump is required for a truly self-contained CIA.
+
+Dump DSP firmware on your own 3DS (Luma3DS: Rosalina menu > Miscellaneous options > Dump DSP firmware), then either:
+  * keep the SD card mounted while building, or
+  * pass -DspFirm <path-to-dspfirm.cdc>, or
+  * set N3DS_DSPFIRM to that file.
+
+The firmware is not downloaded or stored in this repository.
+"@
+}
+$buildPath = Resolve-RepoPath -Path $BuildDir
+$usingPrivateAssetDir = -not [bool]$AssetDir
+$assetPath = if ($usingPrivateAssetDir) {
+    Join-Path $buildPath "assets"
+} else {
+    Resolve-RepoPath -Path $AssetDir
+}
+$preprocessorSource = Join-Path $repoRoot "tools\n3ds-preprocess\main.c"
+New-Item -ItemType Directory -Force -Path $buildPath | Out-Null
+
+$preprocessorPath = Get-ExistingPreprocessor -ExplicitPath $Preprocessor
+$needsPreprocessorBuild = -not $preprocessorPath
+if (-not $needsPreprocessorBuild -and -not $SkipPreprocessorBuild -and (Test-Path -LiteralPath $preprocessorSource -PathType Leaf)) {
+    if ((Get-Item -LiteralPath $preprocessorSource).LastWriteTimeUtc -gt (Get-Item -LiteralPath $preprocessorPath).LastWriteTimeUtc) {
+        $needsPreprocessorBuild = $true
+    }
+}
+
+if ($needsPreprocessorBuild) {
+    if ($SkipPreprocessorBuild) {
+        throw "n3ds-preprocess is missing or stale, but -SkipPreprocessorBuild was specified."
+    }
+    Write-Host "Building host preprocessor..."
+    & (Join-Path $PSScriptRoot "build-preprocessor.ps1")
+    $preprocessorPath = Get-ExistingPreprocessor -ExplicitPath ""
+    if (-not $preprocessorPath) {
+        throw "Host preprocessor build succeeded, but n3ds-preprocess could not be located."
+    }
+}
+
+$effectiveSkipPreprocess = [bool]$SkipPreprocess
+if ($effectiveSkipPreprocess) {
+    $sourceManifestPath = Join-Path $assetPath "n3ds_source_manifest.json"
+    $sourceIsCurrent = $false
+    if (Test-Path -LiteralPath $sourceManifestPath -PathType Leaf) {
+        try {
+            $sourceManifest = Get-Content -LiteralPath $sourceManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            $currentDataWinHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $dataWinPath).Hash.ToLowerInvariant()
+            $currentExternalAudio = Get-ExternalAudioFingerprint -DataWinPath $dataWinPath
+            $currentPreprocessorHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $preprocessorPath).Hash.ToLowerInvariant()
+            $manifestAudio = $sourceManifest.external_audio
+            $sourceIsCurrent =
+                ([string]$sourceManifest.data_win_sha256).ToLowerInvariant() -eq $currentDataWinHash -and
+                $null -ne $manifestAudio -and
+                ([int]$manifestAudio.file_count) -eq ([int]$currentExternalAudio.file_count) -and
+                ([int64]$manifestAudio.total_bytes) -eq ([int64]$currentExternalAudio.total_bytes) -and
+                ([string]$manifestAudio.sha256).ToLowerInvariant() -eq ([string]$currentExternalAudio.sha256).ToLowerInvariant() -and
+                $sourceManifest.PSObject.Properties.Name -contains "preprocessor_sha256" -and
+                ([string]$sourceManifest.preprocessor_sha256).ToLowerInvariant() -eq $currentPreprocessorHash
+        }
+        catch {
+            $sourceIsCurrent = $false
+        }
+    }
+
+    if (-not $sourceIsCurrent) {
+        Write-Host ""
+        Write-Host "Preprocess inputs or preprocessor changed; refreshing 3DS assets despite -SkipPreprocess." -ForegroundColor Yellow
+        $effectiveSkipPreprocess = $false
+    }
+}
+
+if (-not $effectiveSkipPreprocess) {
+    # CIA builds use a private generated-asset tree by default so switching
+    # between GameMaker titles cannot carry stale BCWAV/texture files forward.
+    if ($usingPrivateAssetDir -and (Test-Path -LiteralPath $assetPath)) {
+        Remove-Item -LiteralPath $assetPath -Recurse -Force
+    }
+
+    Write-Host ""
+    Write-Host "Preprocessing local data.win and sibling audio for Nintendo 3DS..."
+    $preprocessArgs = @{
+        DataWin = $dataWinPath
+        OutputDir = $assetPath
+        Preprocessor = $preprocessorPath
+        Tex3ds = $Tex3ds
+    }
+    & (Join-Path $PSScriptRoot "preprocess-game.ps1") @preprocessArgs
+}
+
+if (-not (Test-Path -LiteralPath $assetPath -PathType Container)) {
+    throw "Generated asset directory was not found: $assetPath"
+}
+
+$requiredRuntimeAssets = @(
+    "gfx\atlas.bin",
+    "gfx\direct_assets.bin",
+    "audio\sound_bank.bin"
+)
+foreach ($relative in $requiredRuntimeAssets) {
+    $requiredPath = Join-Path $assetPath $relative
+    if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
+        throw "Required preprocessed CIA asset is missing: $requiredPath"
+    }
+}
+
+$metadataPath = Join-Path $assetPath "game_metadata.json"
+if (-not (Test-Path -LiteralPath $metadataPath -PathType Leaf)) {
+    throw "GameMaker metadata was not found: $metadataPath. Rebuild the host preprocessor and run again."
+}
+
+$metadata = Get-Content -LiteralPath $metadataPath -Raw -Encoding UTF8 | ConvertFrom-Json
+$presetPath = Join-Path $repoRoot "resources\3ds\meta\game-presets.json"
+$presetDocument = Get-Content -LiteralPath $presetPath -Raw -Encoding UTF8 | ConvertFrom-Json
+
+$preset = $null
+if ($PresetId) {
+    $preset = @($presetDocument.presets) | Where-Object { $_.id -ieq $PresetId } | Select-Object -First 1
+    if (-not $preset) { throw "Unknown game metadata preset: $PresetId" }
+} else {
+    foreach ($candidate in @($presetDocument.presets)) {
+        if (Test-GamePresetMatch -Preset $candidate -Metadata $metadata) {
+            $preset = $candidate
+            break
+        }
+    }
+}
+
+$detectedTitle = [string]$metadata.display_name
+if (-not $detectedTitle) { $detectedTitle = [string]$metadata.name }
+if (-not $detectedTitle) { $detectedTitle = [string]$metadata.file_name }
+if (-not $detectedTitle) { $detectedTitle = "GameMaker Game" }
+
+$resolvedTitle = if ($Title) { $Title } elseif ($preset -and $preset.title) { [string]$preset.title } else { $detectedTitle }
+$resolvedDescription = if ($Description) { $Description } elseif ($preset -and $preset.description) { [string]$preset.description } else { "$resolvedTitle for Nintendo 3DS" }
+$resolvedAuthor = if ($Author) { $Author } elseif ($preset -and $preset.author) { [string]$preset.author } else { "Local GameMaker build" }
+
+$gameId = [uint32]$metadata.game_id
+$resolvedUniqueId = if ($UniqueId) {
+    $UniqueId
+} elseif ($preset -and $preset.unique_id) {
+    [string]$preset.unique_id
+} else {
+    "0x{0:X5}" -f (0xF0000 -bor ([int]$gameId -band 0xFFFF))
+}
+
+$resolvedProductCode = if ($ProductCode) {
+    $ProductCode
+} elseif ($preset -and $preset.product_code) {
+    [string]$preset.product_code
+} else {
+    "CTR-H-{0:X4}" -f ([int]$gameId -band 0xFFFF)
+}
+
+$presetIcon = if ($preset -and $preset.icon) { [string]$preset.icon } else { "" }
+$presetBannerImage = if ($preset -and $preset.banner_image) { [string]$preset.banner_image } else { "" }
+$presetBannerAudio = if ($preset -and $preset.banner_audio) { [string]$preset.banner_audio } else { "" }
+
+$iconPath = Resolve-MetadataAsset -OverridePath $Icon -PresetPath $presetIcon -Label "3DS icon"
+$bannerImagePath = Resolve-MetadataAsset -OverridePath $BannerImage -PresetPath $presetBannerImage -Label "3DS banner image"
+$bannerAudioPath = Resolve-MetadataAsset -OverridePath $BannerAudio -PresetPath $presetBannerAudio -Label "3DS banner audio"
+
+if (-not $iconPath -or -not $bannerImagePath -or -not $bannerAudioPath) {
+    throw "No complete 3DS metadata preset matched '$detectedTitle'. Add a preset or pass -Icon, -BannerImage, and -BannerAudio."
+}
+
+Write-Host ""
+Write-Host "Game metadata:"
+Write-Host "  Detected:     $detectedTitle"
+Write-Host "  Preset:       $(if ($preset) { $preset.id } else { '(custom)' })"
+Write-Host "  Home title:   $resolvedTitle"
+Write-Host "  Product code: $resolvedProductCode"
+Write-Host "  Unique ID:    $resolvedUniqueId"
+
+$romfsPath = Join-Path $buildPath "romfs"
+$appBuildPath = Join-Path $buildPath "app"
+$packagePath = Join-Path $buildPath "package"
+$ciaPath = Join-Path $buildPath ((Get-SafeFileStem -Value $resolvedTitle) + ".cia")
+$rsfPath = Join-Path $repoRoot "resources\3ds\meta\template.rsf"
+
+$devkitPro = if ($env:DEVKITPRO) { $env:DEVKITPRO } else { "C:\devkitPro" }
+$makeromPath = Resolve-Executable -ExplicitPath $Makerom -CommandNames @("makerom.exe", "makerom") -FallbackPaths @(
+    (Join-Path $devkitPro "tools\bin\makerom.exe"),
+    (Join-Path $devkitPro "tools\bin\makerom")
+) -Label "makerom"
+$bannertoolPath = Resolve-Executable -ExplicitPath $Bannertool -CommandNames @("bannertool.exe", "bannertool") -FallbackPaths @(
+    (Join-Path $devkitPro "tools\bin\bannertool.exe"),
+    (Join-Path $devkitPro "tools\bin\bannertool")
+) -Label "bannertool"
+
+if (-not $makeromPath) {
+    if ($NoToolDownload) {
+        throw "makerom was not found and -NoToolDownload was specified. Add it to PATH or pass -Makerom <path>."
+    }
+    $makeromPath = Install-PinnedPackagingTool -ToolKey "makerom"
+}
+if (-not $bannertoolPath) {
+    if ($NoToolDownload) {
+        throw "bannertool was not found and -NoToolDownload was specified. Add it to PATH or pass -Bannertool <path>."
+    }
+    $bannertoolPath = Install-PinnedPackagingTool -ToolKey "bannertool"
+}
+if (-not (Test-Path -LiteralPath $rsfPath -PathType Leaf)) {
+    throw "CIA RSF template was not found: $rsfPath"
+}
+
+$ciaSucceeded = $false
+try {
+    if (Test-Path -LiteralPath $romfsPath) {
+        Remove-Item -LiteralPath $romfsPath -Recurse -Force
+    }
+    New-Item -ItemType Directory -Force -Path $romfsPath | Out-Null
+
+    foreach ($item in Get-ChildItem -LiteralPath $assetPath -Force) {
+        if ($item.Name -ieq "game_metadata.json" -or $item.Name -ieq "data.win" -or $item.Name -ieq "n3ds_source_manifest.json") { continue }
+        Copy-Item -LiteralPath $item.FullName -Destination $romfsPath -Recurse -Force
+    }
+    Copy-Item -LiteralPath $dataWinPath -Destination (Join-Path $romfsPath "data.win") -Force
+    Copy-Item -LiteralPath $dspFirmPath -Destination (Join-Path $romfsPath "dspfirm.cdc") -Force
+
+    $inputPreset = Get-OptionalProperty -Object $preset -Name "input" -Fallback $null
+    $touchEnabled = [bool](Get-OptionalProperty -Object $inputPreset -Name "touch_enabled" -Fallback $false)
+    if ($touchEnabled) {
+        $tapKeyCode = [int](Get-OptionalProperty -Object $inputPreset -Name "tap_key_code" -Fallback 90)
+        $tapMaxMs = [int](Get-OptionalProperty -Object $inputPreset -Name "tap_max_ms" -Fallback 180)
+        $tapMaxMovePx = [int](Get-OptionalProperty -Object $inputPreset -Name "tap_max_move_px" -Fallback 10)
+        $dragDeadzonePx = [int](Get-OptionalProperty -Object $inputPreset -Name "drag_deadzone_px" -Fallback 18)
+        $battleMenuTouchEnabled = [bool](Get-OptionalProperty -Object $inputPreset -Name "battle_menu_touch_enabled" -Fallback $false)
+        $battleFollowEnabled = [bool](Get-OptionalProperty -Object $inputPreset -Name "battle_follow_enabled" -Fallback $false)
+        $battleFollowTargetToken = [string](Get-OptionalProperty -Object $inputPreset -Name "battle_follow_target_token" -Fallback "")
+        $battleFollowTargetObjectIndex = [int](Get-OptionalProperty -Object $inputPreset -Name "battle_follow_target_object_index" -Fallback -1)
+        $battleFollowActiveSelfVar = [string](Get-OptionalProperty -Object $inputPreset -Name "battle_follow_active_self_var" -Fallback "")
+        $battleFollowActiveGreaterThan = [int](Get-OptionalProperty -Object $inputPreset -Name "battle_follow_active_greater_than" -Fallback 0)
+        $battleFollowTolerance = [int](Get-OptionalProperty -Object $inputPreset -Name "battle_follow_tolerance" -Fallback 4)
+        $battleFollowActivationMs = [int](Get-OptionalProperty -Object $inputPreset -Name "battle_follow_activation_ms" -Fallback 50)
+        $battleFollowStepHint = [int](Get-OptionalProperty -Object $inputPreset -Name "battle_follow_step_hint" -Fallback 4)
+        $inputProfilePath = Join-Path $romfsPath "cinnamon_input_profile.cfg"
+        @(
+            "schema=1",
+            "touch_enabled=1",
+            "tap_key_code=$tapKeyCode",
+            "tap_max_ms=$tapMaxMs",
+            "tap_max_move_px=$tapMaxMovePx",
+            "drag_deadzone_px=$dragDeadzonePx",
+            "battle_menu_touch_enabled=$(if ($battleMenuTouchEnabled) { 1 } else { 0 })",
+            "battle_follow_enabled=$(if ($battleFollowEnabled) { 1 } else { 0 })",
+            "battle_follow_target_token=$battleFollowTargetToken",
+            "battle_follow_target_object_index=$battleFollowTargetObjectIndex",
+            "battle_follow_active_self_var=$battleFollowActiveSelfVar",
+            "battle_follow_active_greater_than=$battleFollowActiveGreaterThan",
+            "battle_follow_tolerance=$battleFollowTolerance",
+            "battle_follow_activation_ms=$battleFollowActivationMs",
+            "battle_follow_step_hint=$battleFollowStepHint"
+        ) | Set-Content -LiteralPath $inputProfilePath -Encoding ASCII
+    }
+
+    Write-Host ""
+    Write-Host "Building Nintendo 3DS ELF for CIA packaging..."
+    # The CIA's RomFS is attached by makerom below. Avoid making a second
+    # self-contained 3DSX containing the user's proprietary data.win.
+    $n3dsArgs = @{
+        BuildDir = $appBuildPath
+        Configuration = $Configuration
+        NoRomfs = $true
+        DisableBottomScreen = $DisableBottomScreen
+    }
+    & (Join-Path $PSScriptRoot "build-n3ds.ps1") @n3dsArgs
+
+    $elfPath = Join-Path $appBuildPath "cinnamon.elf"
+    if (-not (Test-Path -LiteralPath $elfPath -PathType Leaf)) {
+        $elfPath = Get-ChildItem -LiteralPath $appBuildPath -Recurse -File -Filter "cinnamon.elf" | Select-Object -First 1 -ExpandProperty FullName
+    }
+    if (-not $elfPath -or -not (Test-Path -LiteralPath $elfPath -PathType Leaf)) {
+        throw "cinnamon.elf was not found under $appBuildPath."
+    }
+    $elfPath = (Resolve-Path -LiteralPath $elfPath).Path
+
+    if (Test-Path -LiteralPath $packagePath) {
+        Remove-Item -LiteralPath $packagePath -Recurse -Force
+    }
+    New-Item -ItemType Directory -Force -Path $packagePath | Out-Null
+
+    $iconIcn = Join-Path $packagePath "icon.icn"
+    $bannerBnr = Join-Path $packagePath "banner.bnr"
+
+    Write-Host ""
+    Write-Host "Creating Home Menu metadata..."
+    & $bannertoolPath makesmdh -s $resolvedTitle -l $resolvedDescription -p $resolvedAuthor -i $iconPath -o $iconIcn
+    if ($LASTEXITCODE -ne 0) { throw "bannertool makesmdh failed with exit code $LASTEXITCODE." }
+
+    & $bannertoolPath makebanner -i $bannerImagePath -a $bannerAudioPath -o $bannerBnr
+    if ($LASTEXITCODE -ne 0) { throw "bannertool makebanner failed with exit code $LASTEXITCODE." }
+
+    if (Test-Path -LiteralPath $ciaPath -PathType Leaf) {
+        Remove-Item -LiteralPath $ciaPath -Force
+    }
+
+    $romfsMakeromPath = ([System.IO.Path]::GetFullPath($romfsPath)).Replace('\', '/')
+    $makeromArgs = @(
+        "-f", "cia",
+        "-o", $ciaPath,
+        "-target", "t",
+        "-exefslogo",
+        "-elf", $elfPath,
+        "-rsf", $rsfPath,
+        "-icon", $iconIcn,
+        "-banner", $bannerBnr,
+        "-DAPP_TITLE=$resolvedTitle",
+        "-DAPP_PRODUCT_CODE=$resolvedProductCode",
+        "-DAPP_UNIQUE_ID=$resolvedUniqueId",
+        "-DAPP_ENCRYPTED=false",
+        "-DAPP_ROMFS=$romfsMakeromPath",
+        "-DAPP_SYSTEM_MODE=64MB",
+        "-DAPP_SYSTEM_MODE_EXT=124MB",
+        "-DAPP_CPU_SPEED=804MHz",
+        "-DAPP_ENABLE_L2_CACHE=true",
+        "-DAPP_CAN_ACCESS_CORE2=false",
+        "-major", "0",
+        "-minor", "2",
+        "-micro", "0"
+    )
+
+    Write-Host ""
+    Write-Host "Packaging local self-contained CIA..."
+    Write-Host "  makerom: $makeromPath"
+    Write-Host "  RomFS:   $romfsPath"
+    & $makeromPath @makeromArgs
+    if ($LASTEXITCODE -ne 0) { throw "makerom failed with exit code $LASTEXITCODE." }
+    if (-not (Test-Path -LiteralPath $ciaPath -PathType Leaf)) {
+        throw "makerom returned success, but the CIA was not created: $ciaPath"
+    }
+
+    $ciaHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $ciaPath).Hash.ToLowerInvariant()
+    $dataWinHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $dataWinPath).Hash.ToLowerInvariant()
+    $dspFirmHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $dspFirmPath).Hash.ToLowerInvariant()
+    $elfHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $elfPath).Hash.ToLowerInvariant()
+
+    $manifestDir = Join-Path $repoRoot "build\repro"
+    New-Item -ItemType Directory -Force -Path $manifestDir | Out-Null
+    $manifestPath = Join-Path $manifestDir "n3ds-cia-build.json"
+
+    $manifest = [ordered]@{
+        format = "local-self-contained-cia"
+        detected_game = [ordered]@{
+            display_name = $metadata.display_name
+            name = $metadata.name
+            game_id = $metadata.game_id
+            steam_app_id = $metadata.steam_app_id
+            bytecode_version = $metadata.bytecode_version
+        }
+        preset = $(if ($preset) { [string]$preset.id } else { $null })
+        home_menu = [ordered]@{
+            title = $resolvedTitle
+            description = $resolvedDescription
+            author = $resolvedAuthor
+            product_code = $resolvedProductCode
+            unique_id = $resolvedUniqueId
+        }
+        configuration = $Configuration
+        data_win_sha256 = $dataWinHash
+        dsp_firm_sha256 = $dspFirmHash
+        dsp_firm_embedded = $true
+        elf = $elfPath
+        elf_sha256 = $elfHash
+        cia = (Resolve-Path -LiteralPath $ciaPath).Path
+        cia_sha256 = $ciaHash
+        makerom = $makeromPath
+        bannertool = $bannertoolPath
+        generated_utc = [DateTime]::UtcNow.ToString("o")
+    }
+    $manifest | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
+
+    $ciaSucceeded = $true
+    Write-Host ""
+    Write-Host "Nintendo 3DS CIA build completed." -ForegroundColor Green
+    Write-Host "CIA:      $ciaPath"
+    Write-Host "SHA-256:  $ciaHash"
+    Write-Host "Title:    $resolvedTitle"
+    Write-Host "Preset:   $(if ($preset) { $preset.id } else { '(custom)' })"
+    Write-Host "Manifest: $manifestPath"
+}
+finally {
+    if (-not $KeepStaging -and (Test-Path -LiteralPath $romfsPath)) {
+        Remove-Item -LiteralPath $romfsPath -Recurse -Force
+        if ($ciaSucceeded) {
+            Write-Host "Removed temporary RomFS staging (including copied data.win)."
+        } else {
+            Write-Host "Removed temporary RomFS staging after failure."
+        }
+    }
+}

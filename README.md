@@ -111,6 +111,8 @@ On Windows, build from PowerShell with:
 .\build-windows-n3ds.ps1
 ```
 
+For this fork, the Windows wrapper defaults to embedding the locally preprocessed assets from `build/game-assets/current` and writes a reproducibility manifest to `build/repro/n3ds-build.json`. A double-click launcher is also available as `build-new3ds.cmd`. See `docs/N3DS_BUILD.md` for the full workflow.
+
 
 You can also use the repository Makefile on Linux or from an MSYS2/devkitPro shell on Windows:
 
@@ -136,6 +138,22 @@ cmake -S . -B build/n3ds -DN3DS_DISABLE_BOTTOM_SCREEN=ON
 The main output is `build/n3ds/cinnamon.3dsx`.
 
 The 3DS build will package `resources/3ds/romfs` into the `.3dsx` if that directory exists. The runner also checks `sdmc:/3ds/cinnamon` at runtime, so you can either bundle preprocessed assets into `romfs` or copy them onto the SD card.
+
+### Building a local self-contained CIA
+
+The Windows CIA wrapper builds a local installable CIA from a user-supplied `data.win`. The original GameMaker data and all preprocessed 3DS assets are staged into the CIA RomFS, so the installed title does not need `sdmc:/3ds/cinnamon/data.win` at runtime.
+
+```powershell
+.\build-windows-n3ds-cia.ps1 -DataWin "C:\path\to\data.win" -NoPause
+```
+
+The preprocessor exports `game_metadata.json` from the GameMaker GEN8 chunk. The CIA packager uses `displayName`, `name`, `gameID`, and `steamAppID` to select a metadata preset from `resources/3ds/meta/game-presets.json`. The UNDERTALE preset automatically selects the existing UNDERTALE 48x48 icon, 256x128 banner, banner audio, title, and title identity. Unknown GameMaker titles can provide their own preset or pass `-Icon`, `-BannerImage`, and `-BannerAudio` explicitly.
+
+The packaging step first looks for `makerom` and `bannertool` in `PATH`, under `$DEVKITPRO/tools/bin`, or at paths supplied with `-Makerom` and `-Bannertool`. If they are still missing, the Windows wrapper downloads pinned releases into `build/tools/n3ds-packaging`: MakeROM 0.18.4 from Project_CTR and bannertool 1.2.3 from the maintained 3ds-bannertool fork. Pass `-NoToolDownload` to require manually installed tools instead.
+
+A self-contained CIA also needs the console's own `dspfirm.cdc` so NDSP audio can initialize without Homebrew Launcher's `hb:ndsp` handle. Dump it once on your own console (Luma3DS Rosalina: Miscellaneous options -> Dump DSP firmware), then pass `-DspFirm <path>`. If the 3DS SD card is mounted as a removable Windows drive, the wrapper also auto-detects `/3ds/dspfirm.cdc`. The firmware is copied only into the temporary CIA RomFS; it is never committed or downloaded by the project.
+
+The copied `data.win` and `dspfirm.cdc` exist only in the temporary build RomFS and are removed after packaging unless `-KeepStaging` is used. The generated `.cia`, `data.win`, and `dspfirm.cdc` are ignored by Git.
 
 ## Using the 3DS preprocessor
 

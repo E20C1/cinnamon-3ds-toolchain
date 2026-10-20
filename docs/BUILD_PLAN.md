@@ -4,13 +4,15 @@ The work is intentionally staged so failures can be attributed to one layer at a
 
 ## Milestone 1: reproduce the inherited preprocessor
 
-Build `tools/n3ds-preprocess` from source and compare its behavior with the known historical Linux binary where practical.
+Status: **local acceptance reached**. The Windows bootstrap, source-built host preprocessor, local `data.win` conversion, required output validation, and reproducibility manifests have all completed successfully on the reference development machine.
 
 Acceptance: a user-owned UNDERTALE `data.win` can be converted without corruption into the asset layout expected by the 3DS runtime.
 
 ## Milestone 2: reproduce the inherited 3DSX build
 
-Build Cinnamon with `PLATFORM=n3ds` using the generated assets either from `resources/3ds/romfs` or `sdmc:/3ds/cinnamon`.
+Status: **acceptance reached on New Nintendo 3DS hardware**. The Release `cinnamon.3dsx` launches from the Homebrew Launcher, reads the user's local `data.win`, reaches playable UNDERTALE behavior, accepts the Japanese language setting, and produces working game audio. The first hardware pass also exposed a text-readability issue: dense Japanese glyphs become visibly degraded after the 3DS top-screen downscale.
+
+Build Cinnamon with `PLATFORM=n3ds` using the generated assets either embedded in RomFS or loaded from `sdmc:/3ds/cinnamon`.
 
 Acceptance: the resulting `cinnamon.3dsx` launches and reaches playable UNDERTALE behavior on New Nintendo 3DS hardware.
 

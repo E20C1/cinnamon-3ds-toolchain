@@ -71,6 +71,22 @@
 #define N3DS_C2D_FLUSH_DRAW_BUDGET 192u
 #define N3DS_PERF_LOG_INTERVAL_FRAMES 30u
 #define N3DS_ATLAS_TRACE_LOG_PATH "sdmc:/3ds/cinnamon/atlas_trace.log"
+#define N3DS_DIALOGUE_RENDER_TRACE_PATH "sdmc:/3ds/cinnamon/dialogue_trace.log"
+#define N3DS_DIALOGUE_RENDER_TRACE_LIMIT 4096u
+
+static FILE* gN3DSDialogueRenderTraceFile = NULL;
+static uint32_t gN3DSDialogueRenderTraceCount = 0u;
+
+static FILE* N3DSRenderer_getDialogueTraceFile(void) {
+    if (gN3DSDialogueRenderTraceFile != NULL) return gN3DSDialogueRenderTraceFile;
+    gN3DSDialogueRenderTraceFile = fopen(N3DS_DIALOGUE_RENDER_TRACE_PATH, "a");
+    if (gN3DSDialogueRenderTraceFile != NULL) {
+        setvbuf(gN3DSDialogueRenderTraceFile, NULL, _IOLBF, 0);
+        fputs("Cinnamon 3DS dialogue trace: renderer tracing active\n", gN3DSDialogueRenderTraceFile);
+        fflush(gN3DSDialogueRenderTraceFile);
+    }
+    return gN3DSDialogueRenderTraceFile;
+}
 
 typedef struct {
     uint16_t width;
@@ -267,7 +283,7 @@ typedef struct {
     uint8_t reserved;
 } N3DSRoomManifestPageRef;
 
-typedef struct {
+typedef struct N3DSRenderer {
     Renderer base;
     C3D_RenderTarget* topTarget;
     C3D_RenderTarget* bottomTarget;
@@ -330,6 +346,7 @@ typedef struct {
     uint32_t frameBlobReads;
     uint32_t frameDirectBlobReads;
     uint32_t framePageImports;
+    uint32_t framePageEvictions;
     uint32_t frameImportFailures;
     uint32_t frameImportEvictions;
     uint32_t frameFragmentDraws;
@@ -340,6 +357,7 @@ typedef struct {
     uint32_t frameTextureSwitches;
     uint32_t frameTextGlyphDraws;
     uint32_t frameTextTenthsMs;
+    uint32_t frameC2DFlushes;
     uint32_t pendingC2DDraws;
     bool atlasLoaded;
     char startupError[160];
@@ -390,6 +408,170 @@ typedef struct {
     bool isNew3DS;
     bool pendingOld3DSAtlasFlush;
 } N3DSRenderer;
+
+static bool N3DSRenderer_shouldTraceBattleDraw(const N3DSRenderer* renderer) {
+    return renderer != NULL &&
+        gN3DSDialogueRenderTraceCount < N3DS_DIALOGUE_RENDER_TRACE_LIMIT &&
+        (renderer->topScreenBattleViewActive ||
+         renderer->topScreenGuiActive ||
+         renderer->topScreenGui2xActive);
+}
+
+static void N3DSRenderer_traceBattleSprite(
+    N3DSRenderer* renderer,
+    const char* kind,
+    int32_t tpagIndex,
+    int32_t srcX,
+    int32_t srcY,
+    int32_t srcW,
+    int32_t srcH,
+    float x,
+    float y,
+    float xscale,
+    float yscale
+) {
+    // Disabled after the hardware trace identified the real half-resolution
+    // Japanese font path. Keeping the helper for now avoids a large diagnostic
+    // cleanup diff while eliminating SD I/O and its severe frame-time cost.
+    return;
+    if (!N3DSRenderer_shouldTraceBattleDraw(renderer)) return;
+    FILE* file = N3DSRenderer_getDialogueTraceFile();
+    if (file == NULL) return;
+
+    int32_t spriteIndex = -1;
+    int32_t frameIndex = -1;
+    const char* spriteName = "<unmapped>";
+    if (renderer->tpagToSpriteIndex != NULL &&
+        tpagIndex >= 0 &&
+        (uint32_t) tpagIndex < renderer->base.dataWin->tpag.count) {
+        spriteIndex = renderer->tpagToSpriteIndex[tpagIndex];
+        if (renderer->tpagToSpriteFrameIndex != NULL) {
+            frameIndex = renderer->tpagToSpriteFrameIndex[tpagIndex];
+        }
+        if (spriteIndex >= 0 && (uint32_t) spriteIndex < renderer->base.dataWin->sprt.count) {
+            const char* candidate = renderer->base.dataWin->sprt.sprites[spriteIndex].name;
+            if (candidate != NULL) spriteName = candidate;
+        }
+    }
+
+    char line[512];
+    snprintf(
+        line,
+        sizeof(line),
+        "%04lu R_SPR kind=%s tpag=%ld sprite=%ld:%s frame=%ld src=%ld,%ld,%ld,%ld xy=%.2f,%.2f scale=%.3f,%.3f viewScale=%.3f,%.3f flags=b%d,g%d,g2%d,target%u\n",
+        (unsigned long) gN3DSDialogueRenderTraceCount,
+        kind != NULL ? kind : "?",
+        (long) tpagIndex,
+        (long) spriteIndex,
+        spriteName,
+        (long) frameIndex,
+        (long) srcX,
+        (long) srcY,
+        (long) srcW,
+        (long) srcH,
+        (double) x,
+        (double) y,
+        (double) xscale,
+        (double) yscale,
+        (double) renderer->viewScaleX,
+        (double) renderer->viewScaleY,
+        renderer->topScreenBattleViewActive ? 1 : 0,
+        renderer->topScreenGuiActive ? 1 : 0,
+        renderer->topScreenGui2xActive ? 1 : 0,
+        (unsigned int) renderer->activeSceneTarget
+    );
+    fputs(line, file);
+    fflush(file);
+    gN3DSDialogueRenderTraceCount++;
+}
+
+static void N3DSRenderer_traceBattleText(
+    N3DSRenderer* renderer,
+    Renderer* base,
+    Font* font,
+    const char* text,
+    float x,
+    float y,
+    float xscale,
+    float yscale,
+    float effectiveXScale,
+    float effectiveYScale
+) {
+    // Disabled after the hardware trace identified the real half-resolution
+    // Japanese font path. This prevents thousands of synchronous SD writes.
+    return;
+    bool containsNonAscii = false;
+    if (text != NULL) {
+        for (const unsigned char* p = (const unsigned char*) text; *p != '\0'; ++p) {
+            if (*p >= 0x80u) {
+                containsNonAscii = true;
+                break;
+            }
+        }
+    }
+    if (!containsNonAscii && !N3DSRenderer_shouldTraceBattleDraw(renderer)) return;
+    FILE* file = N3DSRenderer_getDialogueTraceFile();
+    if (file == NULL) return;
+
+    size_t len = text != NULL ? strlen(text) : 0u;
+    char line[768];
+    int used = snprintf(
+        line,
+        sizeof(line),
+        "%04lu R_TXT font=%ld:%s spriteFont=%d sprite=%ld tpag=%ld xy=%.2f,%.2f argScale=%.3f,%.3f effScale=%.3f,%.3f fontScale=%.3f,%.3f viewScale=%.3f,%.3f flags=b%d,g%d,g2%d,target%u len=%lu bytes=",
+        (unsigned long) gN3DSDialogueRenderTraceCount,
+        (long) base->drawFont,
+        (font != NULL && font->name != NULL) ? font->name : "<unnamed>",
+        font != NULL && font->isSpriteFont ? 1 : 0,
+        font != NULL ? (long) font->spriteIndex : -1L,
+        font != NULL ? (long) font->tpagIndex : -1L,
+        (double) x,
+        (double) y,
+        (double) xscale,
+        (double) yscale,
+        (double) effectiveXScale,
+        (double) effectiveYScale,
+        font != NULL ? (double) font->scaleX : 0.0,
+        font != NULL ? (double) font->scaleY : 0.0,
+        (double) renderer->viewScaleX,
+        (double) renderer->viewScaleY,
+        renderer->topScreenBattleViewActive ? 1 : 0,
+        renderer->topScreenGuiActive ? 1 : 0,
+        renderer->topScreenGui2xActive ? 1 : 0,
+        (unsigned int) renderer->activeSceneTarget,
+        (unsigned long) len
+    );
+    if (used < 0) return;
+    size_t cursor = (size_t) used;
+    if (cursor >= sizeof(line)) cursor = sizeof(line) - 1u;
+
+    size_t preview = len < 64u ? len : 64u;
+    for (size_t i = 0; i < preview && cursor + 2u < sizeof(line); ++i) {
+        int wrote = snprintf(
+            line + cursor,
+            sizeof(line) - cursor,
+            "%02X",
+            (unsigned int) (unsigned char) text[i]
+        );
+        if (wrote <= 0) break;
+        cursor += (size_t) wrote;
+    }
+    if (preview < len && cursor + 3u < sizeof(line)) {
+        memcpy(line + cursor, "...", 3u);
+        cursor += 3u;
+    }
+    if (cursor + 1u < sizeof(line)) {
+        line[cursor++] = '\n';
+        line[cursor] = '\0';
+    } else {
+        line[sizeof(line) - 2u] = '\n';
+        line[sizeof(line) - 1u] = '\0';
+    }
+
+    fputs(line, file);
+    fflush(file);
+    gN3DSDialogueRenderTraceCount++;
+}
 
 enum {
     N3DS_SCENE_TARGET_NONE = 0,
@@ -616,7 +798,9 @@ static double N3DSRenderer_ticksToMs(u64 ticks) {
 
 static void N3DSRenderer_resetFramePerfCounters(N3DSRenderer* renderer) {
     renderer->frameBlobReads = 0;
+    renderer->frameDirectBlobReads = 0;
     renderer->framePageImports = 0;
+    renderer->framePageEvictions = 0;
     renderer->frameImportFailures = 0;
     renderer->frameImportEvictions = 0;
     renderer->frameFragmentDraws = 0;
@@ -627,6 +811,7 @@ static void N3DSRenderer_resetFramePerfCounters(N3DSRenderer* renderer) {
     renderer->frameTextureSwitches = 0;
     renderer->frameTextGlyphDraws = 0;
     renderer->frameTextTenthsMs = 0;
+    renderer->frameC2DFlushes = 0;
     renderer->pendingC2DDraws = 0;
     renderer->lastDrawTexture = NULL;
     renderer->lastDirectTPAGIndex = -1;
@@ -1266,6 +1451,7 @@ static void N3DSRenderer_unloadPage(N3DSRenderer* renderer, uint32_t pageIndex) 
     N3DSLoadedAtlasPage* page = &renderer->atlasPages[pageIndex];
     if (!page->ready) return;
     C2D_Flush();
+    renderer->frameC2DFlushes++;
     renderer->pendingC2DDraws = 0;
     renderer->lastDrawTexture = NULL;
 
@@ -1521,6 +1707,7 @@ static bool N3DSRenderer_evictLRUPage(N3DSRenderer* renderer, uint32_t excludePa
 
     if (bestIndex == UINT32_MAX) return false;
     N3DSRenderer_unloadPage(renderer, bestIndex);
+    renderer->framePageEvictions++;
     return true;
 }
 
@@ -1833,6 +2020,7 @@ static void N3DSRenderer_setDefaultGPUState(N3DSRenderer* renderer) {
 static void N3DSRenderer_flushC2DQueue(N3DSRenderer* renderer) {
     if (renderer == NULL || renderer->pendingC2DDraws == 0) return;
     C2D_Flush();
+    renderer->frameC2DFlushes++;
     renderer->pendingC2DDraws = 0;
     renderer->lastDrawTexture = NULL;
 }
@@ -2138,11 +2326,33 @@ static bool N3DSRenderer_tryLoadDirectSpriteImage(N3DSRenderer* renderer, int32_
     bool preferFrameFallback = (spriteIndex == 24);
     const char* spriteName = NULL;
     bool preferNamedButtonOverride = false;
+    bool preferAttackTargetChoiceDirect = false;
+    bool preferAttackTargetDirect = false;
+    bool preferAttackStrikeDirect = false;
 
     if (renderer->base.dataWin != NULL &&
         (uint32_t) spriteIndex < renderer->base.dataWin->sprt.count) {
-        spriteName = renderer->base.dataWin->sprt.sprites[spriteIndex].name;
+        Sprite* sprite = &renderer->base.dataWin->sprt.sprites[spriteIndex];
+        spriteName = sprite->name;
         preferNamedButtonOverride = Renderer_isBattleButtonSpriteName(spriteName);
+        preferAttackTargetChoiceDirect =
+            spriteName != NULL &&
+            strcmp(spriteName, "spr_targetchoice") == 0 &&
+            sprite->width == 14 &&
+            sprite->height == 128 &&
+            sprite->textureCount == 2;
+        preferAttackTargetDirect =
+            spriteName != NULL &&
+            strcmp(spriteName, "spr_target") == 0 &&
+            sprite->width == 562 &&
+            sprite->height == 128 &&
+            sprite->textureCount == 1;
+        preferAttackStrikeDirect =
+            spriteName != NULL &&
+            strcmp(spriteName, "spr_strike") == 0 &&
+            sprite->width == 26 &&
+            sprite->height == 110 &&
+            sprite->textureCount == 6;
         if (spriteName != NULL &&
             (strstr(spriteName, "spr_mainchara") != NULL ||
              strstr(spriteName, "spr_f_mainchara") != NULL ||
@@ -2164,7 +2374,11 @@ static bool N3DSRenderer_tryLoadDirectSpriteImage(N3DSRenderer* renderer, int32_
         N3DSDirectTextureAsset* existingFrameAsset = &spriteAsset->frameAssets[frameIndex];
         hasLoadedDirectFrame = existingFrameAsset->ready || (existingFrameAsset->blobData != NULL && existingFrameAsset->blobSize > 0);
     }
-    bool allowColdDirectLoad = preferNamedButtonOverride;
+    bool preferPinnedAttackDirect =
+        preferAttackTargetChoiceDirect ||
+        preferAttackTargetDirect ||
+        preferAttackStrikeDirect;
+    bool allowColdDirectLoad = preferNamedButtonOverride || preferPinnedAttackDirect;
     if (!allowColdDirectLoad && !hasLoadedDirectSheet && !hasLoadedDirectFrame) {
         return false;
     }
@@ -2219,6 +2433,7 @@ static bool N3DSRenderer_tryLoadDirectSpriteImage(N3DSRenderer* renderer, int32_
     if (sheetAsset->ready && (uint32_t) frameIndex < spriteAsset->sheetFrameCount) {
         sheetAsset->lastUsedStamp = ++renderer->directAssetUseCounter;
         sheetAsset->lastUsedFrame = renderer->frameSequence;
+        if (preferPinnedAttackDirect) sheetAsset->pinned = true;
         N3DSRenderer_buildSheetFrameImages(spriteAsset);
         if (spriteAsset->sheetFrameImages != NULL) {
             *outImage = &spriteAsset->sheetFrameImages[frameIndex];
@@ -2237,6 +2452,7 @@ static bool N3DSRenderer_tryLoadDirectSpriteImage(N3DSRenderer* renderer, int32_
             if ((uint32_t) frameIndex < spriteAsset->sheetFrameCount) {
                 sheetAsset->lastUsedStamp = ++renderer->directAssetUseCounter;
                 sheetAsset->lastUsedFrame = renderer->frameSequence;
+                if (preferPinnedAttackDirect) sheetAsset->pinned = true;
                 N3DSRenderer_buildSheetFrameImages(spriteAsset);
                 if (spriteAsset->sheetFrameImages != NULL) {
                     *outImage = &spriteAsset->sheetFrameImages[frameIndex];
@@ -2255,6 +2471,7 @@ static bool N3DSRenderer_tryLoadDirectSpriteImage(N3DSRenderer* renderer, int32_
     if (frameAsset->ready) {
         frameAsset->lastUsedStamp = ++renderer->directAssetUseCounter;
         frameAsset->lastUsedFrame = renderer->frameSequence;
+        if (preferPinnedAttackDirect) frameAsset->pinned = true;
         *outImage = &frameAsset->image;
         return true;
     }
@@ -2263,6 +2480,7 @@ static bool N3DSRenderer_tryLoadDirectSpriteImage(N3DSRenderer* renderer, int32_
     char fallbackPath[256];
     snprintf(fallbackPath, sizeof(fallbackPath), "sprites/spr_%05d_frame_%05d.t3x", (int) spriteIndex, (int) frameIndex);
     if (!N3DSRenderer_loadDirectTextureAsset(renderer, frameAsset, fallbackPath)) return false;
+    if (preferPinnedAttackDirect) frameAsset->pinned = true;
     *outImage = &frameAsset->image;
     return true;
 }
@@ -3305,11 +3523,13 @@ static void N3DSRenderer_init(Renderer* base, DataWin* dataWin) {
     (void) N3DSRenderer_loadPackedDirectAssets(renderer);
     (void) N3DSRenderer_loadRoomManifest(renderer);
     renderer->atlasTraceMask = safeCalloc(renderer->atlasItemCount > 0 ? renderer->atlasItemCount : 1u, sizeof(uint8_t));
+#if N3DS_ENABLE_LOGGING
     renderer->atlasTraceFile = fopen(N3DS_ATLAS_TRACE_LOG_PATH, "wb");
     if (renderer->atlasTraceFile != NULL) {
         fprintf(renderer->atlasTraceFile, "N3DS atlas trace start\n");
         fflush(renderer->atlasTraceFile);
     }
+#endif
     N3DSRenderer_preloadFontPages(renderer);
     C2D_SetTintMode(C2D_TintMult);
     fprintf(
@@ -3325,6 +3545,11 @@ static void N3DSRenderer_init(Renderer* base, DataWin* dataWin) {
 }
 
 static void N3DSRenderer_destroy(Renderer* base) {
+    if (gN3DSDialogueRenderTraceFile != NULL) {
+        fflush(gN3DSDialogueRenderTraceFile);
+        fclose(gN3DSDialogueRenderTraceFile);
+        gN3DSDialogueRenderTraceFile = NULL;
+    }
     N3DSRenderer* renderer = (N3DSRenderer*) base;
     repeat(renderer->atlasPageCount, i) {
         N3DSRenderer_unloadPage(renderer, (uint32_t) i);
@@ -3425,6 +3650,7 @@ static void N3DSRenderer_endFrame(MAYBE_UNUSED Renderer* base) {
     N3DSRenderer_logPerfWindowIfNeeded(renderer);
     N3DSRenderer_flushC2DQueue(renderer);
     C2D_Flush();
+    renderer->frameC2DFlushes++;
     renderer->pendingC2DDraws = 0;
     renderer->lastDrawTexture = NULL;
 }
@@ -3776,6 +4002,19 @@ static void N3DSRenderer_drawSprite(Renderer* base, int32_t tpagIndex, float x, 
     TexturePageItem* tpag = &dw->tpag.items[tpagIndex];
 
     N3DSRenderer* renderer = (N3DSRenderer*) base;
+    N3DSRenderer_traceBattleSprite(
+        renderer,
+        "sprite",
+        tpagIndex,
+        0,
+        0,
+        (int32_t) tpag->sourceWidth,
+        (int32_t) tpag->sourceHeight,
+        x,
+        y,
+        xscale,
+        yscale
+    );
     N3DSDynamicCaptureTPAG* dynamicCapture = N3DSRenderer_getDynamicCaptureTPAG(renderer, tpagIndex);
     N3DSRenderer_traceTPAGUsage(renderer, N3DS_TRACE_KIND_SPRITE, tpagIndex);
     renderer->frameSpriteDrawCalls++;
@@ -3866,6 +4105,19 @@ static void N3DSRenderer_drawSpritePart(Renderer* base, int32_t tpagIndex, int32
     }
 
     N3DSRenderer* renderer = (N3DSRenderer*) base;
+    N3DSRenderer_traceBattleSprite(
+        renderer,
+        "sprite_part",
+        tpagIndex,
+        srcOffX,
+        srcOffY,
+        srcW,
+        srcH,
+        x,
+        y,
+        xscale,
+        yscale
+    );
     N3DSDynamicCaptureTPAG* dynamicCapture = N3DSRenderer_getDynamicCaptureTPAG(renderer, tpagIndex);
     N3DSRenderer_traceTPAGUsage(renderer, N3DS_TRACE_KIND_SPRITE_PART, tpagIndex);
     renderer->frameSpritePartDrawCalls++;
@@ -4706,6 +4958,108 @@ static void N3DSRenderer_drawLineColor(Renderer* base, float x1, float y1, float
     N3DSRenderer_noteC2DDraws(renderer, 1u);
 }
 
+// Narrow diagnostic: record distinct actual glyph bounds rather than every
+// writer character on every frame. Keep SD writes away from the hot path.
+static void N3DSRenderer_traceJapaneseGlyphBounds(
+    N3DSRenderer* renderer, Renderer* base, Font* font,
+    const char* text, float x, float y, float argScaleX, float argScaleY,
+    float effectiveXScale, float effectiveYScale, float angleDeg
+) {
+    // Hardware diagnosis complete (v4): fnt_ja_plainbig is the oversized path.
+    // Keep this probe dormant during normal play to avoid diagnostic overhead.
+    return;
+    if (renderer->activeSceneTarget != N3DS_SCENE_TARGET_TOP ||
+        text == NULL || strlen(text) != 3u) return;
+
+    int32_t pos = 0;
+    uint16_t ch = TextUtils_decodeUtf8(text, 3, &pos);
+    if (pos != 3 || ch < 0x3040u || ch > 0x30FFu) return;
+
+    FontGlyph* glyph = TextUtils_findGlyph(font, ch);
+    if (glyph == NULL || glyph->sourceHeight == 0u) return;
+
+    float cursorY = 0.0f;
+    float stride = TextUtils_lineStride(font);
+    if (base->drawValign == 1) cursorY -= stride * 0.5f;
+    else if (base->drawValign == 2) cursorY -= stride;
+    cursorY -= (float) font->ascenderOffset;
+
+    float lineX = x;
+    float lineWidth = TextUtils_measureLineWidth(font, text, 3);
+    if (base->drawHalign == 1) lineX -= lineWidth * effectiveXScale * 0.5f;
+    else if (base->drawHalign == 2) lineX -= lineWidth * effectiveXScale;
+
+    float localX = lineX + (float) glyph->offset * effectiveXScale;
+    float localY = y + cursorY * effectiveYScale;
+    float localBottom = localY + (float) glyph->sourceHeight * effectiveYScale;
+    float screenX = N3DSRenderer_transformScreenX(renderer, localX);
+    float screenTop = N3DSRenderer_transformScreenY(renderer, localY);
+    float screenBottom = N3DSRenderer_transformScreenY(renderer, localBottom);
+    float screenHeight = screenBottom - screenTop;
+
+    const bool isNe = ch == 0x306Du;  // ね
+    if (!isNe && screenHeight < 22.0f && screenBottom < 218.0f) return;
+
+    typedef struct {
+        uint16_t codepoint;
+        int32_t fontIndex;
+        int32_t xBucket;
+        int32_t yBucket;
+        int32_t heightBucket;
+        int32_t scaleBucket;
+        int32_t viewBucket;
+    } BoundsSample;
+    static BoundsSample seenNe[24] = {0};
+    static BoundsSample seenOther[24] = {0};
+    static uint32_t countNe = 0u;
+    static uint32_t countOther = 0u;
+
+    BoundsSample* seen = isNe ? seenNe : seenOther;
+    uint32_t* count = isNe ? &countNe : &countOther;
+    if (*count >= 24u) return;
+
+    BoundsSample key = {0};
+    key.codepoint = ch;
+    key.fontIndex = base->drawFont;
+    key.xBucket = (int32_t) floorf(screenX / 16.0f);
+    key.yBucket = (int32_t) floorf(screenTop / 8.0f);
+    key.heightBucket = (int32_t) floorf(screenHeight / 4.0f);
+    key.scaleBucket = (int32_t) lroundf(argScaleY * 16.0f);
+    key.viewBucket = (int32_t) lroundf(renderer->viewScaleY * 16.0f);
+
+    for (uint32_t i = 0u; i < *count; ++i) {
+        if (seen[i].codepoint == key.codepoint &&
+            seen[i].fontIndex == key.fontIndex &&
+            seen[i].xBucket == key.xBucket &&
+            seen[i].yBucket == key.yBucket &&
+            seen[i].heightBucket == key.heightBucket &&
+            seen[i].scaleBucket == key.scaleBucket &&
+            seen[i].viewBucket == key.viewBucket) return;
+    }
+    // Count before opening the SD file, so even write failures cannot
+    // cause repeated fopen calls on each frame.
+    seen[(*count)++] = key;
+
+    FILE* file = fopen("sdmc:/3ds/cinnamon/glyph_bounds_probe.log", "a");
+    if (file == NULL) return;
+    fprintf(
+        file,
+        "char=U+%04X font=%ld:%s spriteFont=%d xy=%.2f,%.2f arg=%.3f,%.3f fontScale=%.3f,%.3f eff=%.3f,%.3f view=%.3f,%.3f glyph=%ux%u off=%d asc=%d stride=%.2f align=%ld,%ld angle=%.2f localTop=%.2f screenX=%.2f screenTop=%.2f screenBottom=%.2f screenHeight=%.2f over240=%d\n",
+        (unsigned int) ch, (long) base->drawFont, font->name != NULL ? font->name : "<unnamed>", font->isSpriteFont ? 1 : 0,
+        (double) x, (double) y, (double) argScaleX, (double) argScaleY,
+        (double) font->scaleX, (double) font->scaleY,
+        (double) effectiveXScale, (double) effectiveYScale,
+        (double) renderer->viewScaleX, (double) renderer->viewScaleY,
+        (unsigned int) glyph->sourceWidth, (unsigned int) glyph->sourceHeight,
+        (int) glyph->offset, (int) font->ascenderOffset, (double) stride,
+        (long) base->drawHalign, (long) base->drawValign, (double) angleDeg,
+        (double) localY, (double) screenX, (double) screenTop,
+        (double) screenBottom, (double) screenHeight,
+        screenBottom > (float) N3DS_TOP_HEIGHT ? 1 : 0
+    );
+    fclose(file);
+}
+
 static void N3DSRenderer_drawTextCommon(Renderer* base, const char* text, float x, float y, float xscale, float yscale, float angleDeg, bool gradient, int32_t c1, int32_t c2, int32_t c3, int32_t c4, float alpha) {
     DataWin* dw = base->dataWin;
     if (base->drawFont < 0 || (uint32_t) base->drawFont >= dw->font.count) return;
@@ -4717,6 +5071,55 @@ static void N3DSRenderer_drawTextCommon(Renderer* base, const char* text, float 
     Font* font = &dw->font.fonts[base->drawFont];
     float effectiveXScale = xscale * font->scaleX;
     float effectiveYScale = yscale * font->scaleY;
+
+    // Hardware trace (2026-10-18) showed Japanese battle dialogue is often
+    // rendered through the 640x480 battle view at exactly 0.5x on the 3DS top
+    // screen. Earlier fixes enlarged both glyphs and their positions around a
+    // Flowey-specific anchor; that improved readability but made long lines
+    // overflow and did not follow bubbles owned by other speakers.
+    //
+    // Treat normal-size Japanese GameMaker fonts in the half-resolution
+    // top-screen pass the same way. Do not touch text that the game deliberately
+    // scales (for example sudden oversized glyph effects); otherwise the 3DS
+    // readability multiplier compounds the original animation and can push a
+    // glyph far outside its speech bubble. Shaking effects only move x/y, so
+    // they continue to work with this guard.
+    bool useReadableJapaneseBattleText =
+        font->name != NULL &&
+        strncmp(font->name, "fnt_ja_", 7) == 0 &&
+        strcmp(font->name, "fnt_ja_plainbig") != 0 &&
+        renderer->activeSceneTarget == N3DS_SCENE_TARGET_TOP &&
+        fabsf(renderer->viewScaleX - 0.5f) < 0.01f &&
+        fabsf(renderer->viewScaleY - 0.5f) < 0.01f &&
+        fabsf(xscale - 1.0f) < 0.15f &&
+        fabsf(yscale - 1.0f) < 0.15f;
+
+    if (useReadableJapaneseBattleText) {
+        const float readabilityScaleX = 1.25f;
+        const float readabilityScaleY = 1.5f;
+        effectiveXScale *= readabilityScaleX;
+        effectiveYScale *= readabilityScaleY;
+        renderer->textLinearFilterActive = true;
+    }
+
+    N3DSRenderer_traceJapaneseGlyphBounds(
+        renderer, base, font, text, x, y, xscale, yscale,
+        effectiveXScale, effectiveYScale, angleDeg
+    );
+
+    N3DSRenderer_traceBattleText(
+        renderer,
+        base,
+        font,
+        text,
+        x,
+        y,
+        xscale,
+        yscale,
+        effectiveXScale,
+        effectiveYScale
+    );
+
     if (!font->isSpriteFont && font->tpagIndex >= 0) {
         N3DSRenderer_traceTPAGUsage(renderer, N3DS_TRACE_KIND_FONT, font->tpagIndex);
     }
@@ -4733,7 +5136,8 @@ static void N3DSRenderer_drawTextCommon(Renderer* base, const char* text, float 
         !font->isSpriteFont &&
         N3DSRenderer_tryResolveSingleFragmentFontPage(renderer, font->tpagIndex, &fontFragment, &fontPage);
     if (useDirectFontAsset || useSingleFragmentFontFastPath) {
-        if (N3DSRenderer_tryDrawSingleGlyphTextFast(
+        if (!useReadableJapaneseBattleText &&
+            N3DSRenderer_tryDrawSingleGlyphTextFast(
                 base,
                 renderer,
                 font,
@@ -4792,8 +5196,19 @@ static void N3DSRenderer_drawTextCommon(Renderer* base, const char* text, float 
             renderer->frameTextGlyphDraws++;
             if (fabsf(angleDeg) < 0.001f) {
                 N3DSRenderer_drawImageFast(base, &image, drawX, drawY, effectiveXScale, effectiveYScale, gradient ? (uint32_t) c1 : base->drawColor, alpha);
+                if (useReadableJapaneseBattleText) {
+                    // Reinforce the same antialiased coverage without widening the
+                    // glyph. A second identical alpha blend darkens thin strokes
+                    // that still look faint after 0.5x minification.
+                    N3DSRenderer_drawImageFast(base, &image, drawX, drawY, effectiveXScale, effectiveYScale, gradient ? (uint32_t) c1 : base->drawColor, alpha);
+                    renderer->frameTextGlyphDraws++;
+                }
             } else {
                 N3DSRenderer_drawImage(base, &image, drawX, drawY, (float) cachedGlyph->sourceWidth * effectiveXScale, (float) cachedGlyph->sourceHeight * effectiveYScale, 0.0f, 0.0f, angleDeg, gradient ? (uint32_t) c1 : base->drawColor, alpha);
+                if (useReadableJapaneseBattleText) {
+                    N3DSRenderer_drawImage(base, &image, drawX, drawY, (float) cachedGlyph->sourceWidth * effectiveXScale, (float) cachedGlyph->sourceHeight * effectiveYScale, 0.0f, 0.0f, angleDeg, gradient ? (uint32_t) c1 : base->drawColor, alpha);
+                    renderer->frameTextGlyphDraws++;
+                }
             }
         }
         (void) c2;
@@ -4869,6 +5284,26 @@ static void N3DSRenderer_drawTextCommon(Renderer* base, const char* text, float 
                     glyphColor,
                     alpha
                 );
+                if (useReadableJapaneseBattleText) {
+                    N3DSRenderer_drawSpritePart(
+                        base,
+                        font->tpagIndex,
+                        glyph->sourceX,
+                        glyph->sourceY,
+                        glyph->sourceWidth,
+                        glyph->sourceHeight,
+                        cursorX + (float) glyph->offset * effectiveXScale,
+                        cursorY,
+                        effectiveXScale,
+                        effectiveYScale,
+                        angleDeg,
+                        0.0f,
+                        0.0f,
+                        glyphColor,
+                        alpha
+                    );
+                    renderer->frameTextGlyphDraws++;
+                }
             }
 
             if (pos < lineEnd) {
@@ -5218,6 +5653,31 @@ uint32_t N3DSRenderer_getResidentDirectAssetVRAMLimitBytes(Renderer* base) {
     return ((N3DSRenderer*) base)->residentDirectAssetVRAMLimitBytes;
 }
 
+uint32_t N3DSRenderer_getFrameBlobReads(Renderer* base) {
+    if (base == NULL) return 0;
+    return ((N3DSRenderer*) base)->frameBlobReads;
+}
+
+uint32_t N3DSRenderer_getFrameDirectBlobReads(Renderer* base) {
+    if (base == NULL) return 0;
+    return ((N3DSRenderer*) base)->frameDirectBlobReads;
+}
+
+uint32_t N3DSRenderer_getFramePageImports(Renderer* base) {
+    if (base == NULL) return 0;
+    return ((N3DSRenderer*) base)->framePageImports;
+}
+
+uint32_t N3DSRenderer_getFramePageEvictions(Renderer* base) {
+    if (base == NULL) return 0;
+    return ((N3DSRenderer*) base)->framePageEvictions;
+}
+
+uint32_t N3DSRenderer_getFrameImportFailures(Renderer* base) {
+    if (base == NULL) return 0;
+    return ((N3DSRenderer*) base)->frameImportFailures;
+}
+
 uint32_t N3DSRenderer_getFrameFragmentDraws(Renderer* base) {
     if (base == NULL) return 0;
     return ((N3DSRenderer*) base)->frameFragmentDraws;
@@ -5256,6 +5716,11 @@ uint32_t N3DSRenderer_getFrameTextGlyphDraws(Renderer* base) {
 uint32_t N3DSRenderer_getFrameTextTenthsMs(Renderer* base) {
     if (base == NULL) return 0;
     return ((N3DSRenderer*) base)->frameTextTenthsMs;
+}
+
+uint32_t N3DSRenderer_getFrameC2DFlushes(Renderer* base) {
+    if (base == NULL) return 0;
+    return ((N3DSRenderer*) base)->frameC2DFlushes;
 }
 
 int32_t N3DSRenderer_findTileEntryIndex(Renderer* base, int32_t backgroundIndex, int32_t srcX, int32_t srcY, int32_t srcW, int32_t srcH) {

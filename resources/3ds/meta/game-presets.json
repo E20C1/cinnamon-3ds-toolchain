@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "presets": [
+    {
+      "id": "undertale",
+      "match": {
+        "display_names": ["UNDERTALE", "Undertale"],
+        "names": ["UNDERTALE", "Undertale"],
+        "steam_app_ids": [391540]
+      },
+      "title": "UNDERTALE",
+      "description": "UNDERTALE for Nintendo 3DS",
+      "author": "Toby Fox / Project Sunshine",
+      "product_code": "000400000B0E2A00",
+      "unique_id": "0x01929",
+      "icon": "resources/3ds/meta/icon.png",
+      "banner_image": "resources/3ds/meta/banner.png",
+      "banner_audio": "resources/3ds/meta/audio.wav",
+      "input": {
+        "touch_enabled": true,
+        "tap_key_code": 90,
+        "tap_max_ms": 180,
+        "tap_max_move_px": 10,
+        "drag_deadzone_px": 18,
+        "battle_menu_touch_enabled": true,
+        "battle_follow_enabled": true,
+        "battle_follow_target_token": "obj_heart",
+        "battle_follow_target_object_index": 743,
+        "battle_follow_active_self_var": "movement",
+        "battle_follow_active_greater_than": 0,
+        "battle_follow_tolerance": 4,
+        "battle_follow_activation_ms": 50,
+        "battle_follow_step_hint": 4
+      }
+    }
+  ]
+}

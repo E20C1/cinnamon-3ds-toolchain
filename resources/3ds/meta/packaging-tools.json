@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "windows_x86_64": {
+    "makerom": {
+      "version": "0.18.4",
+      "url": "https://github.com/3DSGuy/Project_CTR/releases/download/makerom-v0.18.4/makerom-v0.18.4-win_x86_64.zip",
+      "archive_size": 240069,
+      "sha256": "",
+      "executable": "makerom.exe",
+      "source": "3DSGuy/Project_CTR"
+    },
+    "bannertool": {
+      "version": "1.2.3",
+      "url": "https://github.com/carstene1ns/3ds-bannertool/releases/download/1.2.3/bannertool-1.2.3-windows.zip",
+      "archive_size": 1011995,
+      "sha256": "d0f277bd875e2ad411844378155d27afe124780fcccbd81d9a594e886e2dd3c4",
+      "executable": "bannertool.exe",
+      "source": "carstene1ns/3ds-bannertool"
+    }
+  }
+}

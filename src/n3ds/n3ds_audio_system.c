@@ -195,6 +195,10 @@ struct N3DSAudioSystem {
     AudioSystem base;
     FileSystem* fileSystem;
     bool initialized;
+    bool ndspReady;
+    uint8_t* embeddedDspComponent;
+    uint32_t embeddedDspComponentSize;
+    char startupError[192];
     float masterGain;
     N3DSStreamEntry streams[N3DS_MAX_STREAMS];
     N3DSSoundInstance instances[N3DS_MAX_SOUND_INSTANCES];
@@ -324,7 +328,11 @@ static bool N3DSAudio_readFileFully(const char* path, uint8_t** outData, uint32_
         return false;
     }
 
-    uint8_t* data = safeMalloc((size_t) size);
+    uint8_t* data = malloc((size_t) size);
+    if (data == NULL) {
+        fclose(file);
+        return false;
+    }
     if (fread(data, 1, (size_t) size, file) != (size_t) size) {
         fclose(file);
         free(data);
@@ -334,6 +342,29 @@ static bool N3DSAudio_readFileFully(const char* path, uint8_t** outData, uint32_
     fclose(file);
     *outData = data;
     *outSize = (uint32_t) size;
+    return true;
+}
+
+
+static bool N3DSAudio_tryUseEmbeddedDspComponent(N3DSAudioSystem* audio) {
+    if (audio == NULL) return false;
+
+    uint8_t* component = NULL;
+    uint32_t componentSize = 0;
+    if (!N3DSAudio_readFileFully("romfs:/dspfirm.cdc", &component, &componentSize)) {
+        return false;
+    }
+
+    // Luma's DSP firmware dumper rejects components above 0x10000 bytes.
+    // Keep the same upper bound and reject obviously truncated files.
+    if (componentSize < 0x100u || componentSize > 0x10000u) {
+        free(component);
+        return false;
+    }
+
+    ndspUseComponent(component, componentSize, 0xFFu, 0xFFu);
+    audio->embeddedDspComponent = component;
+    audio->embeddedDspComponentSize = componentSize;
     return true;
 }
 
@@ -442,8 +473,24 @@ static bool N3DSAudio_loadPackedSoundBank(N3DSAudioSystem* audio) {
     N3DSPackedSoundBankEntry* entries = NULL;
     bool loaded = false;
 
-    if (!N3DSAudio_readFileFully(path, &bankData, &bankSize)) goto cleanup;
-    if (bankSize < 16u) goto cleanup;
+    struct stat bankStat;
+    unsigned long expectedBankKB = 0ul;
+    if (stat(path, &bankStat) == 0 && bankStat.st_size > 0) {
+        expectedBankKB = (unsigned long) (((uint64_t) bankStat.st_size + 1023u) / 1024u);
+    }
+    if (!N3DSAudio_readFileFully(path, &bankData, &bankSize)) {
+        snprintf(
+            audio->startupError,
+            sizeof(audio->startupError),
+            "Sound bank read/allocation failed (%lu KB). Press START.",
+            expectedBankKB
+        );
+        goto cleanup;
+    }
+    if (bankSize < 16u) {
+        snprintf(audio->startupError, sizeof(audio->startupError), "Sound bank is truncated. Press START.");
+        goto cleanup;
+    }
     if (N3DSAudio_readU32(bankData + 0u) != N3DS_SOUND_BANK_MAGIC) goto cleanup;
     uint32_t version = N3DSAudio_readU32(bankData + 4u);
     if (version != N3DS_SOUND_BANK_VERSION_BCWAV && version != N3DS_SOUND_BANK_VERSION_PCM16) goto cleanup;
@@ -456,7 +503,16 @@ static bool N3DSAudio_loadPackedSoundBank(N3DSAudioSystem* audio) {
     if (dataOffset < 16u || dataOffset > bankSize) goto cleanup;
     if (16u + tableBytes > dataOffset) goto cleanup;
 
-    entries = safeCalloc(entryCount, sizeof(N3DSPackedSoundBankEntry));
+    entries = calloc(entryCount > 0u ? entryCount : 1u, sizeof(N3DSPackedSoundBankEntry));
+    if (entries == NULL) {
+        snprintf(
+            audio->startupError,
+            sizeof(audio->startupError),
+            "Sound bank metadata allocation failed (%lu entries). Press START.",
+            (unsigned long) entryCount
+        );
+        goto cleanup;
+    }
     repeat(entryCount, i) {
         uint32_t tableOffset = 16u + (uint32_t) i * entryStride;
         uint32_t offset = N3DSAudio_readU32(bankData + tableOffset + 0u);
@@ -2812,9 +2868,29 @@ static void N3DSAudio_init(AudioSystem* base, DataWin* dataWin, FileSystem* file
     audio->roomPrewarmByteBudget = audio->isNew3DS ? N3DS_ROOM_PREWARM_BYTE_BUDGET_NEW3DS : N3DS_ROOM_PREWARM_BYTE_BUDGET_OLD3DS;
     audio->backgroundPrewarmSoundCount = audio->isNew3DS ? N3DS_BACKGROUND_PREWARM_SOUND_COUNT_NEW3DS : N3DS_BACKGROUND_PREWARM_SOUND_COUNT_OLD3DS;
     audio->backgroundPrewarmByteBudget = audio->isNew3DS ? N3DS_BACKGROUND_PREWARM_BYTE_BUDGET_NEW3DS : N3DS_BACKGROUND_PREWARM_BYTE_BUDGET_OLD3DS;
-    N3DSAudio_loadPackedSoundBank(audio);
+    if (!N3DSAudio_loadPackedSoundBank(audio)) {
+        if (audio->startupError[0] == '\0') {
+            snprintf(audio->startupError, sizeof(audio->startupError), "Sound bank load failed. Press START.");
+        }
+        return;
+    }
 
-    ndspInit();
+    // Installed CIAs do not receive Homebrew Launcher's hb:ndsp handle.
+    // Prefer a user-supplied DSP component embedded in the CIA RomFS; when it
+    // is absent libctru may still fall back to /3ds/dspfirm.cdc on the SD card.
+    N3DSAudio_tryUseEmbeddedDspComponent(audio);
+    Result ndspResult = ndspInit();
+    if (R_FAILED(ndspResult)) {
+        snprintf(
+            audio->startupError,
+            sizeof(audio->startupError),
+            "DSP init failed 0x%08lX. Rebuild CIA with -DspFirm, or dump /3ds/dspfirm.cdc. Press START.",
+            (unsigned long) ndspResult
+        );
+        N3DSDebugLog_event("audio_fail", "ndspInit failed rc=0x%08lX", (unsigned long) ndspResult);
+        return;
+    }
+    audio->ndspReady = true;
     ndspSetOutputMode(NDSP_OUTPUT_STEREO);
     N3DSDebugLog_event(
         "audio",
@@ -2895,7 +2971,13 @@ static void N3DSAudio_destroy(AudioSystem* base) {
     free(audio->cachedSounds);
     free(audio->packedSoundBankEntries);
     free(audio->packedSoundBankData);
-    ndspExit();
+    if (audio->ndspReady) {
+        ndspExit();
+        audio->ndspReady = false;
+    }
+    free(audio->embeddedDspComponent);
+    audio->embeddedDspComponent = NULL;
+    audio->embeddedDspComponentSize = 0;
     free(audio->base.audioGroups);
     free(audio);
 
@@ -3792,6 +3874,18 @@ static AudioSystemVtable N3DSAudio_vtable = {
     .destroyStream = N3DSAudio_destroyStream,
     .prewarmRoom = N3DSAudio_prewarmRoom,
 };
+
+
+bool N3DSAudioSystem_isReady(AudioSystem* base) {
+    N3DSAudioSystem* audio = (N3DSAudioSystem*) base;
+    return audio != NULL && audio->ndspReady && audio->initialized;
+}
+
+const char* N3DSAudioSystem_getStartupError(AudioSystem* base) {
+    N3DSAudioSystem* audio = (N3DSAudioSystem*) base;
+    if (audio == NULL || audio->startupError[0] == '\0') return NULL;
+    return audio->startupError;
+}
 
 N3DSAudioSystem* N3DSAudioSystem_create(void) {
     N3DSAudioSystem* audio = safeCalloc(1, sizeof(N3DSAudioSystem));

@@ -43,6 +43,18 @@ static void N3DS_setAsrielRainbowInfoLed(Runner* runner);
 
 static RValue builtinN3DSRenderTopScreen(VMContext* ctx, RValue* args, int32_t argCount);
 static bool battleDraw_is3DSBattleActive(VMContext* ctx, Runner* runner);
+#ifdef __3DS__
+static void builtin_trace3DSBattleGlyphSprite(
+    VMContext* ctx,
+    const char* api,
+    int32_t spriteIndex,
+    int32_t subimg,
+    float x,
+    float y,
+    float xscale,
+    float yscale
+);
+#endif
 
 #ifdef __3DS__
 static Result g_n3dsAsrielLedInitRc = 0;
@@ -6508,6 +6520,149 @@ STUB_RETURN_ZERO(psn_default_user)
 STUB_RETURN_ZERO(psn_get_leaderboard_score)
 
 // Draw functions
+#ifdef __3DS__
+#define N3DS_DIALOGUE_TRACE_LIMIT 1024u
+
+static FILE* g_n3dsDialogueTraceFile = NULL;
+static uint32_t g_n3dsDialogueTraceCount = 0u;
+
+static const char* builtin_getTraceObjectName(Runner* runner, Instance* inst) {
+    if (runner == NULL || inst == NULL || runner->dataWin == NULL) return "<none>";
+    if (inst->objectIndex < 0 || (uint32_t) inst->objectIndex >= runner->dataWin->objt.count) return "<invalid>";
+    const char* name = runner->dataWin->objt.objects[inst->objectIndex].name;
+    return name != NULL ? name : "<unnamed>";
+}
+
+static bool builtin_traceObjectLooksDialogueRelated(Runner* runner, Instance* inst) {
+    const char* name = builtin_getTraceObjectName(runner, inst);
+    if (name == NULL) return false;
+    return strstr(name, "writer") != NULL ||
+        strstr(name, "WRITER") != NULL ||
+        strstr(name, "blcon") != NULL ||
+        strstr(name, "flowey") != NULL ||
+        strstr(name, "dialog") != NULL ||
+        strstr(name, "text") != NULL;
+}
+
+static bool builtin_shouldTrace3DSTopEnemyDialogue(VMContext* ctx) {
+    Runner* runner = ctx != NULL ? (Runner*) ctx->runner : NULL;
+    if (runner == NULL || runner->osType != OS_3DS || runner->renderer == NULL) return false;
+
+    Instance* inst = ctx->currentInstance != NULL ? (Instance*) ctx->currentInstance : NULL;
+    if (builtin_traceObjectLooksDialogueRelated(runner, inst)) return true;
+
+    return runner->n3dsDrawBattleActive ||
+        runner->n3dsDrawHasTopEnemyDialogue ||
+        N3DSRenderer_isTopScreenGUIActive(runner->renderer);
+}
+
+static FILE* builtin_get3DSDialogueTraceFile(void) {
+    if (g_n3dsDialogueTraceFile != NULL) return g_n3dsDialogueTraceFile;
+    g_n3dsDialogueTraceFile = fopen("sdmc:/3ds/cinnamon/dialogue_trace.log", "a");
+    if (g_n3dsDialogueTraceFile != NULL) {
+        setvbuf(g_n3dsDialogueTraceFile, NULL, _IOLBF, 0);
+        fprintf(g_n3dsDialogueTraceFile, "Cinnamon 3DS enemy-dialogue draw trace: VM tracing active\n");
+    }
+    return g_n3dsDialogueTraceFile;
+}
+
+static void builtin_trace3DSDialogueSprite(
+    VMContext* ctx,
+    const char* api,
+    int32_t spriteIndex,
+    int32_t subimg,
+    float x,
+    float y,
+    float xscale,
+    float yscale
+) {
+    // Hardware diagnosis complete; disable per-draw SD logging.
+    return;
+    if (!builtin_shouldTrace3DSTopEnemyDialogue(ctx) ||
+        g_n3dsDialogueTraceCount >= N3DS_DIALOGUE_TRACE_LIMIT) return;
+
+    Runner* runner = (Runner*) ctx->runner;
+    Instance* inst = ctx->currentInstance != NULL ? (Instance*) ctx->currentInstance : NULL;
+    const char* spriteName = "<invalid>";
+    if (spriteIndex >= 0 && (uint32_t) spriteIndex < runner->dataWin->sprt.count) {
+        const char* candidate = runner->dataWin->sprt.sprites[spriteIndex].name;
+        if (candidate != NULL) spriteName = candidate;
+    }
+
+    FILE* file = builtin_get3DSDialogueTraceFile();
+    if (file == NULL) return;
+    fprintf(
+        file,
+        "%04lu SPR api=%s code=%s obj=%s inst=%ld sprite=%ld:%s sub=%ld xy=%.2f,%.2f scale=%.3f,%.3f\n",
+        (unsigned long) g_n3dsDialogueTraceCount,
+        api != NULL ? api : "?",
+        ctx->currentCodeName != NULL ? ctx->currentCodeName : "<none>",
+        builtin_getTraceObjectName(runner, inst),
+        inst != NULL ? (long) inst->instanceId : -1L,
+        (long) spriteIndex,
+        spriteName,
+        (long) subimg,
+        (double) x,
+        (double) y,
+        (double) xscale,
+        (double) yscale
+    );
+    fflush(file);
+    g_n3dsDialogueTraceCount++;
+}
+
+static void builtin_trace3DSDialogueText(
+    VMContext* ctx,
+    const char* text,
+    float x,
+    float y,
+    float dialogueScale
+) {
+    // Hardware diagnosis complete; disable per-glyph SD logging.
+    return;
+    bool containsNonAscii = false;
+    if (text != NULL) {
+        for (const unsigned char* p = (const unsigned char*) text; *p != '\0'; ++p) {
+            if (*p >= 0x80u) {
+                containsNonAscii = true;
+                break;
+            }
+        }
+    }
+    if ((!containsNonAscii && !builtin_shouldTrace3DSTopEnemyDialogue(ctx)) ||
+        g_n3dsDialogueTraceCount >= N3DS_DIALOGUE_TRACE_LIMIT) return;
+
+    Runner* runner = (Runner*) ctx->runner;
+    Instance* inst = ctx->currentInstance != NULL ? (Instance*) ctx->currentInstance : NULL;
+    FILE* file = builtin_get3DSDialogueTraceFile();
+    if (file == NULL) return;
+
+    size_t len = text != NULL ? strlen(text) : 0u;
+    fprintf(
+        file,
+        "%04lu TXT code=%s obj=%s inst=%ld font=%ld xy=%.2f,%.2f dialogueScale=%.3f len=%lu bytes=",
+        (unsigned long) g_n3dsDialogueTraceCount,
+        ctx->currentCodeName != NULL ? ctx->currentCodeName : "<none>",
+        builtin_getTraceObjectName(runner, inst),
+        inst != NULL ? (long) inst->instanceId : -1L,
+        (long) runner->renderer->drawFont,
+        (double) x,
+        (double) y,
+        (double) dialogueScale,
+        (unsigned long) len
+    );
+
+    size_t preview = len < 48u ? len : 48u;
+    for (size_t i = 0; i < preview; ++i) {
+        fprintf(file, "%02X", (unsigned int) (unsigned char) text[i]);
+    }
+    if (preview < len) fprintf(file, "...");
+    fputc('\n', file);
+    fflush(file);
+    g_n3dsDialogueTraceCount++;
+}
+#endif
+
 static RValue builtin_drawSprite(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
     Runner* runner = (Runner*) ctx->runner;
     if (runner->renderer == nullptr) return RValue_makeUndefined();
@@ -6521,6 +6676,10 @@ static RValue builtin_drawSprite(VMContext* ctx, RValue* args, MAYBE_UNUSED int3
     if (0 > subimg && ctx->currentInstance != nullptr) {
         subimg = (int32_t) ((Instance*) ctx->currentInstance)->imageIndex;
     }
+
+#ifdef __3DS__
+    builtin_trace3DSBattleGlyphSprite(ctx, "draw_sprite", spriteIndex, subimg, x, y, 1.0f, 1.0f);
+#endif
 
     Renderer_drawSprite(runner->renderer, spriteIndex, subimg, x, y);
     return RValue_makeUndefined();
@@ -6543,6 +6702,10 @@ static RValue builtin_drawSpriteExt(VMContext* ctx, RValue* args, MAYBE_UNUSED i
     if (0 > subimg && ctx->currentInstance != nullptr) {
         subimg = (int32_t) ((Instance*) ctx->currentInstance)->imageIndex;
     }
+
+#ifdef __3DS__
+    builtin_trace3DSBattleGlyphSprite(ctx, "draw_sprite_ext", spriteIndex, subimg, x, y, xscale, yscale);
+#endif
 
     Renderer_drawSpriteExt(runner->renderer, spriteIndex, subimg, x, y, xscale, yscale, rot, color, alpha);
     return RValue_makeUndefined();
@@ -6605,6 +6768,9 @@ static RValue builtin_drawSpriteStretched(VMContext* ctx, RValue* args, MAYBE_UN
         subimg = (int32_t) ((Instance*) ctx->currentInstance)->imageIndex;
     }
 
+#ifdef __3DS__
+    builtin_trace3DSBattleGlyphSprite(ctx, "draw_sprite_stretched", spriteIndex, subimg, x, y, w, h);
+#endif
     Renderer_drawSpriteStretched(runner->renderer, spriteIndex, subimg, x, y, w, h, 0xFFFFFF, runner->renderer->drawAlpha);
     return RValue_makeUndefined();
 }
@@ -6626,6 +6792,9 @@ static RValue builtin_drawSpriteStretchedExt(VMContext* ctx, RValue* args, MAYBE
         subimg = (int32_t) ((Instance*) ctx->currentInstance)->imageIndex;
     }
 
+#ifdef __3DS__
+    builtin_trace3DSBattleGlyphSprite(ctx, "draw_sprite_stretched_ext", spriteIndex, subimg, x, y, w, h);
+#endif
     Renderer_drawSpriteStretched(runner->renderer, spriteIndex, subimg, x, y, w, h, color, alpha);
     return RValue_makeUndefined();
 }
@@ -6648,6 +6817,9 @@ static RValue builtin_drawSpritePart(VMContext* ctx, RValue* args, MAYBE_UNUSED 
         subimg = (int32_t) ((Instance*) ctx->currentInstance)->imageIndex;
     }
 
+#ifdef __3DS__
+    builtin_trace3DSBattleGlyphSprite(ctx, "draw_sprite_part", spriteIndex, subimg, x, y, 1.0f, 1.0f);
+#endif
     Renderer_drawSpritePart(runner->renderer, spriteIndex, subimg, left, top, width, height, x, y);
     return RValue_makeUndefined();
 }
@@ -6685,6 +6857,9 @@ static RValue builtin_drawSpritePartExt(VMContext* ctx, RValue* args, MAYBE_UNUS
     }
 #endif
 
+#ifdef __3DS__
+    builtin_trace3DSBattleGlyphSprite(ctx, "draw_sprite_part_ext", spriteIndex, subimg, x, y, xscale, yscale);
+#endif
     Renderer_drawSpritePartExt(runner->renderer, spriteIndex, subimg, left, top, width, height, x, y, xscale, yscale, 0.0f, 0.0f, 0.0f, color, alpha);
     return RValue_makeUndefined();
 }
@@ -7028,6 +7203,207 @@ static char* builtin_wrapProcessedTextForWidth(Renderer* renderer, const char* t
     return outText;
 }
 
+#ifdef __3DS__
+static void builtin_trace3DSBattleGlyphText(
+    VMContext* ctx,
+    const char* api,
+    const char* text,
+    float x,
+    float y,
+    float xscale,
+    float yscale,
+    float angle
+) {
+    // v4 identified fnt_ja_plainbig as the oversized glyph path.
+    // Disable SD diagnostics during normal play.
+    return;
+    static uint32_t traceCount = 0u;
+    if (traceCount >= 48u || ctx == NULL || text == NULL) return;
+
+    // Probe only the problematic kana through the VM path that v2 proved is
+    // active on hardware. Deduplicate before any SD I/O to avoid frame drops.
+    size_t rawLen = strlen(text);
+    if (rawLen == 3u) {
+        int32_t probePos = 0;
+        uint16_t probeCh = TextUtils_decodeUtf8(text, 3, &probePos);
+        if (probePos == 3 && probeCh == 0x306Du) { // ね
+            Runner* probeRunner = (Runner*) ctx->runner;
+            if (probeRunner != NULL && probeRunner->renderer != NULL &&
+                probeRunner->osType == OS_3DS) {
+                int32_t fontIndex = probeRunner->renderer->drawFont;
+                Font* probeFont = NULL;
+                if (fontIndex >= 0 && (uint32_t) fontIndex < probeRunner->dataWin->font.count) {
+                    probeFont = &probeRunner->dataWin->font.fonts[fontIndex];
+                }
+
+                static struct {
+                    int32_t fontIndex;
+                    int32_t xBucket;
+                    int32_t yBucket;
+                } seen[8];
+                static uint32_t seenCount = 0u;
+                int32_t xBucket = (int32_t) floorf(x / 16.0f);
+                int32_t yBucket = (int32_t) floorf(y / 16.0f);
+                bool duplicate = false;
+                for (uint32_t i = 0u; i < seenCount; ++i) {
+                    if (seen[i].fontIndex == fontIndex &&
+                        seen[i].xBucket == xBucket &&
+                        seen[i].yBucket == yBucket) {
+                        duplicate = true;
+                        break;
+                    }
+                }
+
+                if (!duplicate && seenCount < 8u) {
+                    seen[seenCount].fontIndex = fontIndex;
+                    seen[seenCount].xBucket = xBucket;
+                    seen[seenCount].yBucket = yBucket;
+                    seenCount++;
+
+                    FontGlyph* probeGlyph = probeFont != NULL
+                        ? TextUtils_findGlyph(probeFont, probeCh)
+                        : NULL;
+                    FILE* probeFile = fopen("sdmc:/3ds/cinnamon/glyph_bounds_probe.log", "a");
+                    if (probeFile != NULL) {
+                        fprintf(
+                            probeFile,
+                            "VM_NE font=%ld:%s xy=%.2f,%.2f arg=%.3f,%.3f fontScale=%.3f,%.3f glyph=%ux%u off=%d shift=%d asc=%d stride=%.2f api=%s\n",
+                            (long) fontIndex,
+                            (probeFont != NULL && probeFont->name != NULL) ? probeFont->name : "<unnamed>",
+                            (double) x,
+                            (double) y,
+                            (double) xscale,
+                            (double) yscale,
+                            probeFont != NULL ? (double) probeFont->scaleX : 0.0,
+                            probeFont != NULL ? (double) probeFont->scaleY : 0.0,
+                            probeGlyph != NULL ? (unsigned int) probeGlyph->sourceWidth : 0u,
+                            probeGlyph != NULL ? (unsigned int) probeGlyph->sourceHeight : 0u,
+                            probeGlyph != NULL ? (int) probeGlyph->offset : 0,
+                            probeGlyph != NULL ? (int) probeGlyph->shift : 0,
+                            probeFont != NULL ? (int) probeFont->ascenderOffset : 0,
+                            probeFont != NULL ? (double) TextUtils_lineStride(probeFont) : 0.0,
+                            api != NULL ? api : "?"
+                        );
+                        fclose(probeFile);
+                    }
+                }
+            }
+        }
+    }
+
+    // Ordinary writer text was responsible for the 512 SD writes in probe v2.
+    if (fabsf(xscale - 1.0f) <= 0.05f && fabsf(yscale - 1.0f) <= 0.05f) return;
+
+    size_t len = strlen(text);
+    if (len == 0u || len > 6u) return;
+
+    bool nonAscii = false;
+    for (const unsigned char* p = (const unsigned char*) text; *p != '\0'; ++p) {
+        if (*p >= 0x80u) { nonAscii = true; break; }
+    }
+    if (!nonAscii) return;
+
+    Runner* runner = (Runner*) ctx->runner;
+    if (runner == NULL || runner->renderer == NULL || runner->osType != OS_3DS) return;
+
+    Instance* inst = ctx->currentInstance != NULL ? (Instance*) ctx->currentInstance : NULL;
+    const char* codeName = ctx->currentCodeName != NULL ? ctx->currentCodeName : "<none>";
+    const char* objName = builtin_getTraceObjectName(runner, inst);
+
+    // The first transformed-text probe was completely consumed by the naming
+    // screen ("くう", obj_intromenu), long before the Flowey battle. Exclude
+    // that path and keep only dialogue-related calls or genuinely transformed
+    // single-glyph calls.
+    if (strcmp(codeName, "gml_Script_scr_namingscreen") == 0 ||
+        strcmp(objName, "obj_intromenu") == 0) return;
+
+    FILE* file = fopen("sdmc:/3ds/cinnamon/battle_glyph_probe.log", "a");
+    if (file == NULL) return;
+
+    fprintf(
+        file,
+        "%03lu TXT api=%s code=%s obj=%s font=%ld xy=%.2f,%.2f scale=%.3f,%.3f angle=%.3f bytes=",
+        (unsigned long) traceCount,
+        api != NULL ? api : "?",
+        codeName,
+        objName,
+        (long) runner->renderer->drawFont,
+        (double) x,
+        (double) y,
+        (double) xscale,
+        (double) yscale,
+        (double) angle
+    );
+    for (size_t i = 0; i < len; ++i) {
+        fprintf(file, "%02X", (unsigned int) (unsigned char) text[i]);
+    }
+    fputc('\n', file);
+    fclose(file);
+    traceCount++;
+}
+
+static void builtin_trace3DSBattleGlyphSprite(
+    VMContext* ctx,
+    const char* api,
+    int32_t spriteIndex,
+    int32_t subimg,
+    float x,
+    float y,
+    float xscale,
+    float yscale
+) {
+    // Sprite probing is no longer needed after the font path was identified.
+    return;
+    static uint32_t traceCount = 0u;
+    if (traceCount >= 256u || ctx == NULL) return;
+
+    Runner* runner = (Runner*) ctx->runner;
+    if (runner == NULL || runner->renderer == NULL || runner->osType != OS_3DS) return;
+
+    Instance* inst = ctx->currentInstance != NULL ? (Instance*) ctx->currentInstance : NULL;
+    const char* codeName = ctx->currentCodeName != NULL ? ctx->currentCodeName : "<none>";
+    const char* objName = builtin_getTraceObjectName(runner, inst);
+    if (strcmp(codeName, "gml_Script_scr_namingscreen") == 0 ||
+        strcmp(objName, "obj_intromenu") == 0) return;
+
+    bool dialogueRelated =
+        builtin_traceObjectLooksDialogueRelated(runner, inst) ||
+        strstr(codeName, "writer") != NULL ||
+        strstr(codeName, "WRITER") != NULL ||
+        strstr(codeName, "blcon") != NULL ||
+        strstr(codeName, "flowey") != NULL ||
+        strstr(codeName, "battle") != NULL;
+    bool transformed = fabsf(xscale - 1.0f) > 0.05f || fabsf(yscale - 1.0f) > 0.05f;
+    if (!dialogueRelated || !transformed) return;
+
+    const char* spriteName = "<invalid>";
+    if (spriteIndex >= 0 && (uint32_t) spriteIndex < runner->dataWin->sprt.count) {
+        const char* candidate = runner->dataWin->sprt.sprites[spriteIndex].name;
+        if (candidate != NULL) spriteName = candidate;
+    }
+
+    FILE* file = fopen("sdmc:/3ds/cinnamon/battle_glyph_probe.log", "a");
+    if (file == NULL) return;
+    fprintf(
+        file,
+        "%03lu SPR api=%s code=%s obj=%s sprite=%ld:%s sub=%ld xy=%.2f,%.2f scale=%.3f,%.3f\n",
+        (unsigned long) traceCount,
+        api != NULL ? api : "?",
+        codeName,
+        objName,
+        (long) spriteIndex,
+        spriteName,
+        (long) subimg,
+        (double) x,
+        (double) y,
+        (double) xscale,
+        (double) yscale
+    );
+    fclose(file);
+    traceCount++;
+}
+#endif
+
 static RValue builtin_drawText(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
     Runner* runner = (Runner*) ctx->runner;
     if (runner->renderer == nullptr) return RValue_makeUndefined();
@@ -7043,6 +7419,10 @@ static RValue builtin_drawText(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_
 
     PreprocessedText processedText = TextUtils_preprocessGmlTextIfNeeded(runner, str);
     float dialogueTextScale = builtin_get3DSTopEnemyDialogueTextScale(runner);
+#ifdef __3DS__
+    builtin_trace3DSBattleGlyphText(ctx, "draw_text", processedText.text, x, y, dialogueTextScale, dialogueTextScale, 0.0f);
+    builtin_trace3DSDialogueText(ctx, processedText.text, x, y, dialogueTextScale);
+#endif
     runner->renderer->vtable->drawText(runner->renderer, processedText.text, x, y, dialogueTextScale, dialogueTextScale, 0.0f);
     PreprocessedText_free(processedText);
     free(ownedStr);
@@ -7067,6 +7447,21 @@ static RValue builtin_drawTextTransformed(VMContext* ctx, RValue* args, MAYBE_UN
 
     PreprocessedText processedText = TextUtils_preprocessGmlTextIfNeeded(runner, str);
     float dialogueTextScale = builtin_get3DSTopEnemyDialogueTextScale(runner);
+#ifdef __3DS__
+    builtin_trace3DSBattleGlyphText(
+        ctx,
+        "draw_text_transformed",
+        processedText.text,
+        x,
+        y,
+        xscale * dialogueTextScale,
+        yscale * dialogueTextScale,
+        angle
+    );
+#endif
+#ifdef __3DS__
+    builtin_trace3DSDialogueText(ctx, processedText.text, x, y, dialogueTextScale);
+#endif
     runner->renderer->vtable->drawText(runner->renderer, processedText.text, x, y, xscale * dialogueTextScale, yscale * dialogueTextScale, angle);
     PreprocessedText_free(processedText);
     free(ownedStr);
@@ -7090,6 +7485,10 @@ static RValue builtin_drawTextExt(VMContext* ctx, RValue* args, MAYBE_UNUSED int
 
     PreprocessedText processedText = TextUtils_preprocessGmlTextIfNeeded(runner, str);
     float dialogueTextScale = builtin_get3DSTopEnemyDialogueTextScale(runner);
+#ifdef __3DS__
+    builtin_trace3DSBattleGlyphText(ctx, "draw_text_ext", processedText.text, x, y, dialogueTextScale, dialogueTextScale, 0.0f);
+    builtin_trace3DSDialogueText(ctx, processedText.text, x, y, dialogueTextScale);
+#endif
     char* wrappedText = builtin_wrapProcessedTextForWidth(runner->renderer, processedText.text, (float) width, dialogueTextScale);
     const char* drawText = wrappedText != NULL ? wrappedText : processedText.text;
     runner->renderer->vtable->drawText(runner->renderer, drawText, x, y, dialogueTextScale, dialogueTextScale, 0.0f);
@@ -7120,6 +7519,21 @@ static RValue builtin_drawTextExtTransformed(VMContext* ctx, RValue* args, MAYBE
 
     PreprocessedText processedText = TextUtils_preprocessGmlTextIfNeeded(runner, str);
     float dialogueTextScale = builtin_get3DSTopEnemyDialogueTextScale(runner);
+#ifdef __3DS__
+    builtin_trace3DSBattleGlyphText(
+        ctx,
+        "draw_text_ext_transformed",
+        processedText.text,
+        x,
+        y,
+        xscale * dialogueTextScale,
+        yscale * dialogueTextScale,
+        angle
+    );
+#endif
+#ifdef __3DS__
+    builtin_trace3DSDialogueText(ctx, processedText.text, x, y, dialogueTextScale);
+#endif
     char* wrappedText = builtin_wrapProcessedTextForWidth(runner->renderer, processedText.text, (float) width, xscale * dialogueTextScale);
     const char* drawText = wrappedText != NULL ? wrappedText : processedText.text;
     runner->renderer->vtable->drawText(runner->renderer, drawText, x, y, xscale * dialogueTextScale, yscale * dialogueTextScale, angle);
@@ -7150,6 +7564,10 @@ static RValue builtin_drawTextColor(VMContext* ctx, RValue* args, MAYBE_UNUSED i
 
     PreprocessedText processedText = TextUtils_preprocessGmlTextIfNeeded(runner, str);
     float dialogueTextScale = builtin_get3DSTopEnemyDialogueTextScale(runner);
+#ifdef __3DS__
+    builtin_trace3DSBattleGlyphText(ctx, "draw_text_color", processedText.text, x, y, dialogueTextScale, dialogueTextScale, 0.0f);
+    builtin_trace3DSDialogueText(ctx, processedText.text, x, y, dialogueTextScale);
+#endif
     runner->renderer->vtable->drawTextColor(runner->renderer, processedText.text, x, y, dialogueTextScale, dialogueTextScale, 0.0f, c1, c2, c3, c4, alpha);
     PreprocessedText_free(processedText);
     free(ownedStr);
@@ -7179,6 +7597,21 @@ static RValue builtin_drawTextColorTransformed(VMContext* ctx, RValue* args, MAY
 
     PreprocessedText processedText = TextUtils_preprocessGmlTextIfNeeded(runner, str);
     float dialogueTextScale = builtin_get3DSTopEnemyDialogueTextScale(runner);
+#ifdef __3DS__
+    builtin_trace3DSBattleGlyphText(
+        ctx,
+        "draw_text_color_transformed",
+        processedText.text,
+        x,
+        y,
+        xscale * dialogueTextScale,
+        yscale * dialogueTextScale,
+        angle
+    );
+#endif
+#ifdef __3DS__
+    builtin_trace3DSDialogueText(ctx, processedText.text, x, y, dialogueTextScale);
+#endif
     runner->renderer->vtable->drawTextColor(runner->renderer, processedText.text, x, y, xscale * dialogueTextScale, yscale * dialogueTextScale, angle, c1, c2, c3, c4, alpha);
     PreprocessedText_free(processedText);
     free(ownedStr);
@@ -7205,6 +7638,10 @@ static RValue builtin_drawTextColorExt(VMContext* ctx, RValue* args, MAYBE_UNUSE
 
     PreprocessedText processedText = TextUtils_preprocessGmlTextIfNeeded(runner, str);
     float dialogueTextScale = builtin_get3DSTopEnemyDialogueTextScale(runner);
+#ifdef __3DS__
+    builtin_trace3DSBattleGlyphText(ctx, "draw_text_color_ext", processedText.text, x, y, dialogueTextScale, dialogueTextScale, 0.0f);
+    builtin_trace3DSDialogueText(ctx, processedText.text, x, y, dialogueTextScale);
+#endif
     char* wrappedText = builtin_wrapProcessedTextForWidth(runner->renderer, processedText.text, (float) RValue_toInt32(args[4]), dialogueTextScale);
     const char* drawText = wrappedText != NULL ? wrappedText : processedText.text;
     runner->renderer->vtable->drawTextColor(runner->renderer, drawText, x, y, dialogueTextScale, dialogueTextScale, 0.0f, c1, c2, c3, c4, alpha);
@@ -7237,6 +7674,21 @@ static RValue builtin_drawTextColorExtTransformed(VMContext* ctx, RValue* args, 
 
     PreprocessedText processedText = TextUtils_preprocessGmlTextIfNeeded(runner, str);
     float dialogueTextScale = builtin_get3DSTopEnemyDialogueTextScale(runner);
+#ifdef __3DS__
+    builtin_trace3DSBattleGlyphText(
+        ctx,
+        "draw_text_color_ext_transformed",
+        processedText.text,
+        x,
+        y,
+        xscale * dialogueTextScale,
+        yscale * dialogueTextScale,
+        angle
+    );
+#endif
+#ifdef __3DS__
+    builtin_trace3DSDialogueText(ctx, processedText.text, x, y, dialogueTextScale);
+#endif
     char* wrappedText = builtin_wrapProcessedTextForWidth(runner->renderer, processedText.text, (float) RValue_toInt32(args[4]), xscale * dialogueTextScale);
     const char* drawText = wrappedText != NULL ? wrappedText : processedText.text;
     runner->renderer->vtable->drawTextColor(runner->renderer, drawText, x, y, xscale * dialogueTextScale, yscale * dialogueTextScale, angle, c1, c2, c3, c4, alpha);

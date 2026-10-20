@@ -91,6 +91,7 @@ typedef enum {
     N3DS_TEXFMT_HYBRID = 3,
     N3DS_TEXFMT_L4 = 4,
     N3DS_TEXFMT_LA4 = 5,
+    N3DS_TEXFMT_LA8 = 6,
 } N3DSTextureFormat;
 
 typedef struct {
@@ -236,6 +237,83 @@ static bool syncStagedOutputToDestination(const Options* options);
 static bool convertBorderAssets(const Options* options);
 static void writeLe32(uint8_t* ptr, uint32_t value);
 
+static void writeJsonString(FILE* file, const char* value) {
+    if (file == NULL) return;
+    fputc('"', file);
+    if (value != NULL) {
+        for (const unsigned char* p = (const unsigned char*) value; *p != '\0'; ++p) {
+            switch (*p) {
+                case '"': fputs("\\\"", file); break;
+                case '\\': fputs("\\\\", file); break;
+                case '\b': fputs("\\b", file); break;
+                case '\f': fputs("\\f", file); break;
+                case '\n': fputs("\\n", file); break;
+                case '\r': fputs("\\r", file); break;
+                case '\t': fputs("\\t", file); break;
+                default:
+                    if (*p < 0x20u) fprintf(file, "\\u%04X", (unsigned int) *p);
+                    else fputc((int) *p, file);
+                    break;
+            }
+        }
+    }
+    fputc('"', file);
+}
+
+static bool writeGameMetadata(const char* outputDir, const DataWin* dataWin) {
+    if (outputDir == NULL || outputDir[0] == '\0' || dataWin == NULL) return false;
+
+    char path[1200];
+    snprintf(path, sizeof(path), "%s/game_metadata.json", outputDir);
+    FILE* file = fopen(path, "wb");
+    if (file == NULL) {
+        fprintf(stderr, "Failed to create GameMaker metadata output: %s\n", path);
+        return false;
+    }
+
+    const Gen8* gen8 = &dataWin->gen8;
+    fputs("{\n", file);
+    fputs("  \"schema_version\": 1,\n", file);
+    fputs("  \"source\": \"GEN8\",\n", file);
+
+    fputs("  \"file_name\": ", file);
+    writeJsonString(file, gen8->fileName);
+    fputs(",\n", file);
+
+    fputs("  \"config\": ", file);
+    writeJsonString(file, gen8->config);
+    fputs(",\n", file);
+
+    fputs("  \"name\": ", file);
+    writeJsonString(file, gen8->name);
+    fputs(",\n", file);
+
+    fputs("  \"display_name\": ", file);
+    writeJsonString(file, gen8->displayName);
+    fputs(",\n", file);
+
+    fprintf(file, "  \"game_id\": %lu,\n", (unsigned long) gen8->gameID);
+    fprintf(file, "  \"steam_app_id\": %ld,\n", (long) gen8->steamAppID);
+    fprintf(file, "  \"bytecode_version\": %u,\n", (unsigned int) gen8->bytecodeVersion);
+    fprintf(
+        file,
+        "  \"version\": {\"major\": %lu, \"minor\": %lu, \"release\": %lu, \"build\": %lu}\n",
+        (unsigned long) gen8->major,
+        (unsigned long) gen8->minor,
+        (unsigned long) gen8->release,
+        (unsigned long) gen8->build
+    );
+    fputs("}\n", file);
+
+    if (fclose(file) != 0) {
+        fprintf(stderr, "Failed to finalize GameMaker metadata output: %s\n", path);
+        return false;
+    }
+
+    fprintf(stderr, "Wrote GameMaker metadata: %s\n", path);
+    return true;
+}
+
 static void setDefaultOptions(Options* out) {
     memset(out, 0, sizeof(*out));
     out->keepPng = false;
@@ -265,7 +343,8 @@ static void printUsage(const char* argv0) {
         "  <output-dir>/gfx/direct_assets.bin\n"
         "  <output-dir>/gfx/room_manifest.bin\n"
         "  <output-dir>/gfx/page_000.t3x ...\n"
-        "  <output-dir>/audio/sound_bank.bin\n",
+        "  <output-dir>/audio/sound_bank.bin\n"
+        "  <output-dir>/game_metadata.json\n",
         argv0
     );
 }
@@ -847,6 +926,7 @@ static const char* getTex3dsFormatName(N3DSTextureFormat format) {
         case N3DS_TEXFMT_HYBRID: return "etc1a4";
         case N3DS_TEXFMT_L4: return "l4";
         case N3DS_TEXFMT_LA4: return "la4";
+        case N3DS_TEXFMT_LA8: return "la8";
         default: return "etc1a4";
     }
 }
@@ -863,6 +943,7 @@ static const char* getTextureFormatLabel(N3DSTextureFormat format) {
         case N3DS_TEXFMT_HYBRID: return "hybrid";
         case N3DS_TEXFMT_L4: return "l4";
         case N3DS_TEXFMT_LA4: return "la4";
+        case N3DS_TEXFMT_LA8: return "la8";
         default: return "unknown";
     }
 }
@@ -2451,7 +2532,23 @@ static bool emitDirectFontAsset(
 
     char relativePath[256];
     snprintf(relativePath, sizeof(relativePath), "gfx/fonts/font_%05lu", (unsigned long) fontIndex);
-    bool ok = writeDirectTextureAsset(options, relativePath, pixels, item->sourceWidth, item->sourceHeight, N3DS_TEXFMT_RGBA5551);
+
+    // Monochrome GameMaker font atlases only need luminance + alpha. LA8 keeps
+    // the full 8-bit alpha channel at the same 16-bpp storage cost as RGBA5551,
+    // instead of RGBA5551's 1-bit alpha or LA4's 4-bit alpha. This better
+    // preserves thin Japanese strokes after the 3DS half-resolution minification.
+    N3DSTextureFormat fontFormat =
+        pixelsLookMonochrome(pixels, item->sourceWidth, item->sourceHeight)
+            ? N3DS_TEXFMT_LA8
+            : N3DS_TEXFMT_RGBA5551;
+    bool ok = writeDirectTextureAsset(
+        options,
+        relativePath,
+        pixels,
+        item->sourceWidth,
+        item->sourceHeight,
+        fontFormat
+    );
     free(pixels);
     return ok;
 }
@@ -4890,9 +4987,11 @@ static bool convertStreamedMusicBcwavs(Options* options, DataWin* dataWin) {
     if (options == NULL || dataWin == NULL) return false;
 
     bool allOk = true;
-    uint32_t convertedCount = 0;
+    uint32_t convertedExternalCount = 0;
+    uint32_t convertedEmbeddedCount = 0;
     uint32_t preservedCount = 0;
-    uint32_t skippedCount = 0;
+    uint32_t skippedMissingCount = 0;
+    uint32_t skippedDecodeCount = 0;
 
     repeat(dataWin->sond.count, soundIndex) {
         const Sound* sound = &dataWin->sond.sounds[soundIndex];
@@ -4907,45 +5006,112 @@ static bool convertStreamedMusicBcwavs(Options* options, DataWin* dataWin) {
         snprintf(outPath, sizeof(outPath), "%s/%s.bcwav", options->outputDir, baseName);
 
         char* externalSourcePath = resolveExternalSoundPath(options, sound);
-        if (externalSourcePath == NULL) {
-            if (fileExists(outPath)) {
-                preservedCount++;
+        if (externalSourcePath != NULL) {
+            remove(outPath);
+            fprintf(
+                stderr,
+                "n3ds-preprocess: music %05zu -> %s [external: %s]\n",
+                soundIndex,
+                outPath,
+                externalSourcePath
+            );
+
+            bool ok = writeBcwavFromInputFile(externalSourcePath, outPath);
+            free(externalSourcePath);
+
+            if (!ok) {
+                fprintf(stderr, "Failed to write streamed music BCWAV for sound %zu from external source\n", soundIndex);
+                allOk = false;
                 continue;
             }
-            if (sound->name != NULL && sound->name[0] != '\0') {
-                fprintf(stderr, "Skipping streamed music %zu (%s): no external audio source found\n", soundIndex, sound->name);
-            }
-            skippedCount++;
+
+            convertedExternalCount++;
             continue;
         }
 
-        remove(outPath);
+        int32_t audioFile = sound->audioFile;
+        const uint8_t* embeddedData = NULL;
+        uint32_t embeddedSize = 0;
+        if (audioFile >= 0 && (uint32_t) audioFile < dataWin->audo.count) {
+            AudioEntry* entry = &dataWin->audo.entries[audioFile];
+            embeddedData = entry->data;
+            embeddedSize = entry->dataSize;
+        }
+
+        if (embeddedData != NULL && embeddedSize > 0) {
+            WavPcm16 pcm;
+            memset(&pcm, 0, sizeof(pcm));
+            if (loadAudioPcm16FromMemory(embeddedData, embeddedSize, &pcm)) {
+                remove(outPath);
+                fprintf(
+                    stderr,
+                    "n3ds-preprocess: music %05zu -> %s [embedded AUDO=%d bytes=%u]\n",
+                    soundIndex,
+                    outPath,
+                    audioFile,
+                    embeddedSize
+                );
+
+                bool ok = writeBcwavFile(outPath, &pcm);
+                freeWavPcm16(&pcm);
+                if (!ok) {
+                    fprintf(
+                        stderr,
+                        "Failed to write streamed music BCWAV for sound %zu from embedded AUDO=%d (%u bytes)\n",
+                        soundIndex,
+                        audioFile,
+                        embeddedSize
+                    );
+                    allOk = false;
+                    continue;
+                }
+
+                convertedEmbeddedCount++;
+                continue;
+            }
+
+            fprintf(
+                stderr,
+                "Skipping streamed music %zu (%s): embedded AUDO=%d exists (%u bytes) but could not be decoded\n",
+                soundIndex,
+                sound->name != NULL ? sound->name : "<unnamed>",
+                audioFile,
+                embeddedSize
+            );
+            skippedDecodeCount++;
+            continue;
+        }
+
+        if (fileExists(outPath)) {
+            fprintf(
+                stderr,
+                "Preserving streamed music %zu (%s): no external/embedded source, existing BCWAV retained [audioFile=%d]\n",
+                soundIndex,
+                sound->name != NULL ? sound->name : "<unnamed>",
+                audioFile
+            );
+            preservedCount++;
+            continue;
+        }
+
         fprintf(
             stderr,
-            "n3ds-preprocess: music %05zu -> %s [%s]\n",
+            "Skipping streamed music %zu (%s): no external source and no embedded AUDO [audioFile=%d]\n",
             soundIndex,
-            outPath,
-            externalSourcePath
+            sound->name != NULL ? sound->name : "<unnamed>",
+            audioFile
         );
-
-        bool ok = writeBcwavFromInputFile(externalSourcePath, outPath);
-        free(externalSourcePath);
-
-        if (!ok) {
-            fprintf(stderr, "Failed to write streamed music BCWAV for sound %zu\n", soundIndex);
-            allOk = false;
-            continue;
-        }
-
-        convertedCount++;
+        skippedMissingCount++;
     }
 
     fprintf(
         stderr,
-        "Streamed music BCWAVs: converted=%u preserved=%u skipped=%u\n",
-        convertedCount,
+        "Streamed music BCWAVs: external=%u embedded=%u preserved=%u skipped_missing=%u skipped_decode=%u\n",
+        convertedExternalCount,
+        convertedEmbeddedCount,
         preservedCount,
-        skippedCount
+        skippedMissingCount,
+        skippedDecodeCount
     );
     return allOk;
 }
@@ -5024,7 +5190,8 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    bool ok = convertTextures(&options, dataWin);
+    bool ok = writeGameMetadata(options.outputDir, dataWin);
+    if (ok) ok = convertTextures(&options, dataWin);
     if (ok) ok = convertAudio(&options, dataWin);
     DataWin_free(dataWin);
 

@@ -467,11 +467,20 @@ typedef struct Runner {
     double frameStepMotionMs;
     double frameStepCollisionMs;
     double frameStepFinalizeMs;
+    double frameStepCleanupMs;
+    uint32_t frameInstancesCreated;
+    uint32_t frameInstancesDestroyed;
     double frameStepTopObjectMs;
     uint32_t frameStepTopObjectCalls;
     int32_t frameStepTopObjectIndex;
     double* frameStepObjectMsByObject;
     uint32_t* frameStepObjectCallsByObject;
+#ifdef __3DS__
+    // Immutable classification caches keyed by DataWin object/sprite index.
+    // They replace repeated hierarchy strcmp/strstr scans in the 3DS battle draw path.
+    uint32_t* n3dsObjectTraits;
+    uint16_t* n3dsSpriteTraits;
+#endif
     bool n3dsDrawBattleStateValid;
     bool n3dsDrawBattleActive;
     bool n3dsDrawDodgingBullets;
@@ -548,3 +557,60 @@ uint32_t Runner_getNextLayerId(Runner* runner);
 void Runner_drawTileLayer(Runner* runner, uint32_t layerIndex, RoomLayerTilesData* data, float layerOffsetX, float layerOffsetY, float alpha);
 void Runner_freeRuntimeLayer(RuntimeLayer* runtimeLayer);
 RunnerTelemetry Runner_collectTelemetry(Runner* runner);
+#ifdef __3DS__
+typedef struct {
+    bool present;
+    float left;
+    float top;
+    float right;
+    float bottom;
+} N3DSBattleMenuButtonRect;
+
+typedef struct {
+    bool battleActive;
+    bool dodgingBullets;
+    float menuNo;
+    int32_t menuCoord[7];
+    int32_t myFight;
+    int32_t mnFight;
+    int32_t mercy;
+    int32_t monsterPresent[3];
+    int32_t choicePresent[6];
+    int32_t itemPresent[8];
+    float idealBorder[4];
+    N3DSBattleMenuButtonRect topButtons[4];
+} N3DSBattleMenuState;
+
+uint32_t Runner_get3DSObjectInstanceCountByName(Runner* runner, const char* objectName);
+bool Runner_get3DSBattleMenuState(Runner* runner, N3DSBattleMenuState* outState);
+bool Runner_map3DSBottomBattleUITouch(
+    Runner* runner,
+    float touchX,
+    float touchY,
+    float* outGameX,
+    float* outGameY
+);
+
+typedef enum {
+    N3DS_BATTLE_TOUCH_NOT_ACTIVE = 0,
+    N3DS_BATTLE_TOUCH_TARGET_NOT_FOUND = 1,
+    N3DS_BATTLE_TOUCH_TARGET_IDLE = 2,
+    N3DS_BATTLE_TOUCH_READY = 3,
+    N3DS_BATTLE_TOUCH_LAYOUT_ERROR = 4
+} N3DSBattleTouchStatus;
+
+N3DSBattleTouchStatus Runner_get3DSBattleTouchTarget(
+    Runner* runner,
+    const char* targetToken,
+    int32_t targetObjectIndex,
+    const char* activeSelfVar,
+    float activeGreaterThan,
+    float touchX,
+    float touchY,
+    float* outActivity,
+    float* outCurrentX,
+    float* outCurrentY,
+    float* outTargetX,
+    float* outTargetY
+);
+#endif
