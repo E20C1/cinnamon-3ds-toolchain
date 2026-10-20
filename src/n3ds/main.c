@@ -985,13 +985,10 @@ static void N3DSPerf_writeEvent(
 
 static void N3DSDustPerf_update(
     N3DSDustPerfSampler* sampler,
-    Runner* runner,
-    Renderer* renderer,
-    double stepMs,
-    const N3DSRenderPerfSample* renderPerf
+    const N3DSDustPerfFrame* captured
 ) {
-    if (sampler == NULL || runner == NULL || renderer == NULL) return;
-    N3DSDustPerfFrame sample = N3DSDustPerf_captureFrame(runner, renderer, stepMs, renderPerf);
+    if (sampler == NULL || captured == NULL) return;
+    N3DSDustPerfFrame sample = *captured;
 
     if (!sampler->active) {
         if (sample.dustCount == 0) {
@@ -1035,13 +1032,10 @@ static void N3DSDustPerf_flushPending(N3DSDustPerfSampler* sampler, Runner* runn
 
 static void N3DSAttackPerf_update(
     N3DSDustPerfSampler* sampler,
-    Runner* runner,
-    Renderer* renderer,
-    double stepMs,
-    const N3DSRenderPerfSample* renderPerf
+    const N3DSDustPerfFrame* captured
 ) {
-    if (sampler == NULL || runner == NULL || renderer == NULL) return;
-    N3DSDustPerfFrame sample = N3DSDustPerf_captureFrame(runner, renderer, stepMs, renderPerf);
+    if (sampler == NULL || captured == NULL) return;
+    N3DSDustPerfFrame sample = *captured;
     bool attackActive = sample.battleActive != 0 && sample.myFight == 1;
 
     if (!sampler->active) {
@@ -2095,8 +2089,9 @@ int main(int argc, char** argv) {
         renderPerf.totalMs = N3DSPerf_ticksToMs(svcGetSystemTick() - renderStartTick);
 
         N3DSDebugMonitor_tickFrame(&debugMonitor, renderPerf.totalMs);
-        N3DSDustPerf_update(&gN3DSDustPerfSampler, runner, renderer, frameStepMs, &renderPerf);
-        N3DSAttackPerf_update(&gN3DSAttackPerfSampler, runner, renderer, frameStepMs, &renderPerf);
+        N3DSDustPerfFrame perfSample = N3DSDustPerf_captureFrame(runner, renderer, frameStepMs, &renderPerf);
+        N3DSDustPerf_update(&gN3DSDustPerfSampler, &perfSample);
+        N3DSAttackPerf_update(&gN3DSAttackPerfSampler, &perfSample);
 
         RunnerKeyboard_beginFrame(runner->keyboard);
         if (touchState.tapPulseFrames > 0u) touchState.tapPulseFrames--;
