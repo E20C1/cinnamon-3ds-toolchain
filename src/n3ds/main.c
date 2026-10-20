@@ -1036,7 +1036,10 @@ static void N3DSAttackPerf_update(
 ) {
     if (sampler == NULL || captured == NULL) return;
     N3DSDustPerfFrame sample = *captured;
-    bool attackActive = sample.battleActive != 0 && sample.myFight == 1;
+    bool targetChoiceAnimating =
+        sample.targetChoiceObjectIndex >= 0 && fabsf(sample.targetChoiceImageSpeed) > 0.001f;
+    bool attackActive =
+        (sample.battleActive != 0 && sample.myFight == 1) || targetChoiceAnimating;
 
     if (!sampler->active) {
         if (!attackActive) {
