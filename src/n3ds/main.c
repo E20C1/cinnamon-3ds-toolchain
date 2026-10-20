@@ -75,6 +75,11 @@ typedef struct {
     uint32_t pageEvictions;
     uint32_t importFailures;
     uint32_t directAssetLoads;
+    uint32_t directLastLoadKind;
+    int32_t directLastLoadIndex;
+    int32_t directLastLoadFrame;
+    uint32_t directLastLoadVRAMBytes;
+    int32_t directLastLoadUsedCachedBlob;
     uint32_t textureSwitches;
     int32_t atlasImportObjectIndex;
     uint32_t atlasImportInstanceId;
@@ -826,6 +831,8 @@ static N3DSDustPerfFrame N3DSDustPerf_captureFrame(Runner* runner, Renderer* ren
     sample.atlasImportTriggerTPAGIndex = -1;
     sample.atlasImportTriggerSpriteIndex = -1;
     sample.atlasImportTriggerFrameIndex = -1;
+    sample.directLastLoadIndex = -1;
+    sample.directLastLoadFrame = -1;
     sample.targetChoiceObjectIndex = -1;
     sample.targetChoiceSpriteIndex = -1;
     sample.targetChoiceSubimg = -1;
@@ -908,6 +915,11 @@ static N3DSDustPerfFrame N3DSDustPerf_captureFrame(Runner* runner, Renderer* ren
     sample.pageEvictions = N3DSRenderer_getFramePageEvictions(renderer);
     sample.importFailures = N3DSRenderer_getFrameImportFailures(renderer);
     sample.directAssetLoads = N3DSRenderer_getFrameDirectAssetLoads(renderer);
+    sample.directLastLoadKind = N3DSRenderer_getFrameDirectLastLoadKind(renderer);
+    sample.directLastLoadIndex = N3DSRenderer_getFrameDirectLastLoadIndex(renderer);
+    sample.directLastLoadFrame = N3DSRenderer_getFrameDirectLastLoadFrame(renderer);
+    sample.directLastLoadVRAMBytes = N3DSRenderer_getFrameDirectLastLoadVRAMBytes(renderer);
+    sample.directLastLoadUsedCachedBlob = N3DSRenderer_getFrameDirectLastLoadUsedCachedBlob(renderer) ? 1 : 0;
     sample.textureSwitches = N3DSRenderer_getFrameTextureSwitches(renderer);
     return sample;
 }
@@ -945,6 +957,16 @@ static const char* N3DSPerf_phaseName(int32_t phase, const char* activePhaseName
     return "post";
 }
 
+static const char* N3DSPerf_directLoadKindName(uint32_t kind) {
+    switch (kind) {
+        case 1u: return "sprite_sheet";
+        case 2u: return "sprite_frame";
+        case 3u: return "background";
+        case 4u: return "font";
+        default: return "";
+    }
+}
+
 static void N3DSPerf_writeEvent(
     N3DSDustPerfSampler* sampler,
     Runner* runner,
@@ -967,10 +989,11 @@ static void N3DSPerf_writeEvent(
         "frame_begin_ms,renderer_begin_ms,draw_views_ms,overlay_ms,renderer_end_ms,frame_end_ms,"
         "c3d_cpu_ms,gpu_prev_ms,cmd_buf_pct,sprite_calls,part_calls,c2d_flushes,"
         "atlas_blob_reads,direct_blob_reads,page_imports,page_evictions,import_failures,"
-        "direct_asset_loads,texture_switches,atlas_object,atlas_object_name,atlas_instance,"
+        "direct_asset_loads,direct_load_kind,direct_load_index,direct_load_frame,direct_load_vram_bytes,"
+        "direct_load_cached_blob,texture_switches,atlas_object,atlas_object_name,atlas_instance,"
         "atlas_instance_sprite,atlas_instance_sprite_name,atlas_instance_subimg,atlas_instance_tpag,"
         "atlas_trigger_tpag,atlas_trigger_sprite,atlas_trigger_sprite_name,atlas_trigger_frame,"
-        "atlas_imports,atlas_evictions,atlas_pass,atlas_pages,target_object,target_name,target_instance,target_sprite,"
+        "atlas_imports,atlas_evictions,atlas_pass,atlas_pages,atlas_page_info,target_object,target_name,target_instance,target_sprite,"
         "target_subimg,target_tpag,target_image_index,target_image_speed,battle_active,myfight,mnfight,"
         "top_step_object,top_step_name,top_step_ms,top_step_calls\n", file);
 
@@ -1008,10 +1031,32 @@ static void N3DSPerf_writeEvent(
         char atlasPages[128];
         atlasPages[0] = '\0';
         size_t atlasPagesCursor = 0;
+        char atlasPageInfo[256];
+        atlasPageInfo[0] = '\0';
+        size_t atlasPageInfoCursor = 0;
         repeat(sample->atlasImportPageCount, pageIndex) {
-            int written = snprintf(atlasPages + atlasPagesCursor, sizeof(atlasPages) - atlasPagesCursor, "%s%u", pageIndex == 0 ? "" : "|", (unsigned int) sample->atlasImportPages[pageIndex]);
-            if (written <= 0 || (size_t) written >= sizeof(atlasPages) - atlasPagesCursor) break;
-            atlasPagesCursor += (size_t) written;
+            uint32_t importedPage = sample->atlasImportPages[pageIndex];
+            int written = snprintf(atlasPages + atlasPagesCursor, sizeof(atlasPages) - atlasPagesCursor, "%s%u", pageIndex == 0 ? "" : "|", (unsigned int) importedPage);
+            if (written > 0 && (size_t) written < sizeof(atlasPages) - atlasPagesCursor) {
+                atlasPagesCursor += (size_t) written;
+            }
+            const char* formatName = runner != NULL
+                ? N3DSRenderer_getAtlasPageFormatName(runner->renderer, importedPage)
+                : "unknown";
+            uint32_t pageVRAMBytes = runner != NULL
+                ? N3DSRenderer_getAtlasPageVRAMBytes(runner->renderer, importedPage)
+                : 0u;
+            written = snprintf(
+                atlasPageInfo + atlasPageInfoCursor,
+                sizeof(atlasPageInfo) - atlasPageInfoCursor,
+                "%s%u:%s:%lu",
+                pageIndex == 0 ? "" : "|",
+                (unsigned int) importedPage,
+                formatName,
+                (unsigned long) pageVRAMBytes
+            );
+            if (written <= 0 || (size_t) written >= sizeof(atlasPageInfo) - atlasPageInfoCursor) break;
+            atlasPageInfoCursor += (size_t) written;
         }
 
         fprintf(file,
@@ -1028,10 +1073,15 @@ static void N3DSPerf_writeEvent(
             (unsigned long) sample->spriteDrawCalls, (unsigned long) sample->spritePartDrawCalls,
             (unsigned long) sample->c2dFlushes);
         fprintf(file,
-            ",%lu,%lu,%lu,%lu,%lu,%lu,%lu",
+            ",%lu,%lu,%lu,%lu,%lu,%lu,%s,%ld,%ld,%lu,%ld,%lu",
             (unsigned long) sample->atlasBlobReads, (unsigned long) sample->directBlobReads,
             (unsigned long) sample->pageImports, (unsigned long) sample->pageEvictions,
             (unsigned long) sample->importFailures, (unsigned long) sample->directAssetLoads,
+            N3DSPerf_directLoadKindName(sample->directLastLoadKind),
+            (long) sample->directLastLoadIndex,
+            (long) sample->directLastLoadFrame,
+            (unsigned long) sample->directLastLoadVRAMBytes,
+            (long) sample->directLastLoadUsedCachedBlob,
             (unsigned long) sample->textureSwitches);
         fprintf(file,
             ",%ld,%s,%lu,%ld,%s,%ld,%ld,%ld,%ld,%s,%ld,%lu,%lu,%s,%s",
@@ -1046,6 +1096,7 @@ static void N3DSPerf_writeEvent(
             (unsigned long) sample->atlasImportCount,
             (unsigned long) sample->atlasImportEvictions,
             atlasPassName, atlasPages);
+        fprintf(file, ",%s", atlasPageInfo);
         fprintf(file,
             ",%ld,%s,%lu,%ld,%ld,%ld,%.3f,%.3f,%ld,%ld,%ld",
             (long) sample->targetChoiceObjectIndex, targetName,
