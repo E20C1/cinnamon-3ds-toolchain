@@ -136,7 +136,6 @@ typedef struct {
 
 static N3DSDustPerfSampler gN3DSDustPerfSampler;
 static N3DSDustPerfSampler gN3DSAttackPerfSampler;
-static bool gN3DSAttackDirectDiagnosticWritten = false;
 
 typedef struct {
     bool touchEnabled;
@@ -921,12 +920,6 @@ static void N3DSPerf_writeEvent(
     if (file == NULL) {
         fprintf(stderr, "N3DS dust perf: failed to open %s\n", N3DS_DUST_PERF_LOG_PATH);
         return;
-    }
-
-    if (!gN3DSAttackDirectDiagnosticWritten && eventName != NULL && strcmp(eventName, "attack") == 0 &&
-        runner != NULL && runner->renderer != NULL) {
-        N3DSRenderer_writeAttackDirectDiagnostic(runner->renderer, file);
-        gN3DSAttackDirectDiagnosticWritten = true;
     }
 
     fprintf(file, "# %s-event %lu samples=%lu truncated=%d\n",
