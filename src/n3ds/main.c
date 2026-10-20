@@ -78,10 +78,32 @@ typedef struct {
     double drawInstancesMs;
     double battleReplayMs;
     double renderMs;
+    double frameBeginMs;
+    double rendererBeginMs;
+    double drawViewsMs;
+    double overlayMs;
+    double rendererEndMs;
+    double frameEndMs;
+    double c3dProcessingMs;
+    double previousGpuDrawingMs;
+    double cmdBufUsagePercent;
     int32_t topStepObjectIndex;
     double topStepObjectMs;
     uint32_t topStepObjectCalls;
 } N3DSDustPerfFrame;
+
+typedef struct {
+    double totalMs;
+    double frameBeginMs;
+    double rendererBeginMs;
+    double drawViewsMs;
+    double overlayMs;
+    double rendererEndMs;
+    double frameEndMs;
+    double c3dProcessingMs;
+    double previousGpuDrawingMs;
+    double cmdBufUsagePercent;
+} N3DSRenderPerfSample;
 
 typedef struct {
     bool active;
@@ -747,7 +769,7 @@ static double N3DSPerf_ticksToMs(u64 ticks) {
     return (double) ticks * 1000.0 / (double) SYSCLOCK_ARM11;
 }
 
-static N3DSDustPerfFrame N3DSDustPerf_captureFrame(Runner* runner, Renderer* renderer, double stepMs, double renderMs) {
+static N3DSDustPerfFrame N3DSDustPerf_captureFrame(Runner* runner, Renderer* renderer, double stepMs, const N3DSRenderPerfSample* renderPerf) {
     N3DSDustPerfFrame sample;
     memset(&sample, 0, sizeof(sample));
     sample.frame = runner != NULL ? runner->frameCount : -1;
@@ -765,7 +787,18 @@ static N3DSDustPerfFrame N3DSDustPerf_captureFrame(Runner* runner, Renderer* ren
         sample.finalizeMs = runner->frameStepFinalizeMs;
         sample.drawInstancesMs = runner->frameDrawInstancesMs;
         sample.battleReplayMs = runner->frameDrawBattleReplayMs;
-        sample.renderMs = renderMs;
+        if (renderPerf != NULL) {
+            sample.renderMs = renderPerf->totalMs;
+            sample.frameBeginMs = renderPerf->frameBeginMs;
+            sample.rendererBeginMs = renderPerf->rendererBeginMs;
+            sample.drawViewsMs = renderPerf->drawViewsMs;
+            sample.overlayMs = renderPerf->overlayMs;
+            sample.rendererEndMs = renderPerf->rendererEndMs;
+            sample.frameEndMs = renderPerf->frameEndMs;
+            sample.c3dProcessingMs = renderPerf->c3dProcessingMs;
+            sample.previousGpuDrawingMs = renderPerf->previousGpuDrawingMs;
+            sample.cmdBufUsagePercent = renderPerf->cmdBufUsagePercent;
+        }
         sample.topStepObjectIndex = runner->frameStepTopObjectIndex;
         sample.topStepObjectMs = runner->frameStepTopObjectMs;
         sample.topStepObjectCalls = runner->frameStepTopObjectCalls;
@@ -822,7 +855,9 @@ static void N3DSDustPerf_writeEvent(N3DSDustPerfSampler* sampler, Runner* runner
     fputs(
         "frame,phase,dust,created,destroyed,draw_instances,step_ms,prep_ms,event_ms,motion_ms,"
         "collision_ms,cleanup_ms,finalize_ms,draw_instances_ms,battle_replay_ms,render_ms,"
-        "sprite_calls,part_calls,c2d_flushes,top_step_object,top_step_name,top_step_ms,top_step_calls\n", file);
+        "frame_begin_ms,renderer_begin_ms,draw_views_ms,overlay_ms,renderer_end_ms,frame_end_ms,"
+        "c3d_cpu_ms,gpu_prev_ms,cmd_buf_pct,sprite_calls,part_calls,c2d_flushes,"
+        "top_step_object,top_step_name,top_step_ms,top_step_calls\n", file);
 
     repeat(sampler->sampleCount, i) {
         const N3DSDustPerfFrame* sample = &sampler->samples[i];
@@ -835,24 +870,32 @@ static void N3DSDustPerf_writeEvent(N3DSDustPerfSampler* sampler, Runner* runner
 
         fprintf(file,
             "%ld,%s,%lu,%lu,%lu,%lu,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,"
-            "%lu,%lu,%lu,%ld,%s,%.3f,%lu\n",
+            "%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.2f,%lu,%lu,%lu,%ld,%s,%.3f,%lu\n",
             (long) sample->frame, N3DSDustPerf_phaseName(sample->phase),
             (unsigned long) sample->dustCount, (unsigned long) sample->instancesCreated,
             (unsigned long) sample->instancesDestroyed, (unsigned long) sample->drawInstances,
             sample->stepMs, sample->prepMs, sample->eventMs, sample->motionMs, sample->collisionMs,
             sample->cleanupMs, sample->finalizeMs, sample->drawInstancesMs, sample->battleReplayMs,
-            sample->renderMs, (unsigned long) sample->spriteDrawCalls,
-            (unsigned long) sample->spritePartDrawCalls, (unsigned long) sample->c2dFlushes,
-            (long) sample->topStepObjectIndex, topName, sample->topStepObjectMs,
-            (unsigned long) sample->topStepObjectCalls);
+            sample->renderMs, sample->frameBeginMs, sample->rendererBeginMs, sample->drawViewsMs,
+            sample->overlayMs, sample->rendererEndMs, sample->frameEndMs, sample->c3dProcessingMs,
+            sample->previousGpuDrawingMs, sample->cmdBufUsagePercent,
+            (unsigned long) sample->spriteDrawCalls, (unsigned long) sample->spritePartDrawCalls,
+            (unsigned long) sample->c2dFlushes, (long) sample->topStepObjectIndex, topName,
+            sample->topStepObjectMs, (unsigned long) sample->topStepObjectCalls);
     }
     fputs("# end dust-event\n", file);
     fclose(file);
 }
 
-static void N3DSDustPerf_update(N3DSDustPerfSampler* sampler, Runner* runner, Renderer* renderer, double stepMs, double renderMs) {
+static void N3DSDustPerf_update(
+    N3DSDustPerfSampler* sampler,
+    Runner* runner,
+    Renderer* renderer,
+    double stepMs,
+    const N3DSRenderPerfSample* renderPerf
+) {
     if (sampler == NULL || runner == NULL || renderer == NULL) return;
-    N3DSDustPerfFrame sample = N3DSDustPerf_captureFrame(runner, renderer, stepMs, renderMs);
+    N3DSDustPerfFrame sample = N3DSDustPerf_captureFrame(runner, renderer, stepMs, renderPerf);
 
     if (!sampler->active) {
         if (sample.dustCount == 0) {
@@ -1862,21 +1905,50 @@ int main(int argc, char** argv) {
         float displayScaleX = 1.0f;
         float displayScaleY = 1.0f;
         Runner_computeViewDisplayScale(runner, gameW, gameH, &displayScaleX, &displayScaleY);
+        N3DSRenderPerfSample renderPerf;
+        memset(&renderPerf, 0, sizeof(renderPerf));
         u64 renderStartTick = svcGetSystemTick();
+
+        u64 phaseTick = svcGetSystemTick();
         C3D_FrameBegin(0);
+        renderPerf.frameBeginMs = N3DSPerf_ticksToMs(svcGetSystemTick() - phaseTick);
+        // C3D_FrameBegin waits for the previous GPU queue. Once it returns,
+        // C3D_GetDrawingTime() is the completed drawing time for that previous frame.
+        renderPerf.previousGpuDrawingMs = (double) C3D_GetDrawingTime();
+
+        Runner_resetFrameDrawStats(runner);
+
+        phaseTick = svcGetSystemTick();
         renderer->vtable->beginFrame(renderer, gameW, gameH, 400, 240);
+        renderPerf.rendererBeginMs = N3DSPerf_ticksToMs(svcGetSystemTick() - phaseTick);
+
+        phaseTick = svcGetSystemTick();
         Runner_drawViews(runner, gameW, gameH, displayScaleX, displayScaleY, false);
+        renderPerf.drawViewsMs = N3DSPerf_ticksToMs(svcGetSystemTick() - phaseTick);
+
+        phaseTick = svcGetSystemTick();
         N3DSRenderer_beginOverlay(renderer);
         if (haveRoomBorder) C2D_DrawSprite(&roomBorder);
         else N3DS_drawFallbackRoomBorder();
         if (debugMonitorVisible) {
             N3DSDebugMonitor_draw(&debugMonitor, runner, renderer);
         }
+        renderPerf.overlayMs = N3DSPerf_ticksToMs(svcGetSystemTick() - phaseTick);
+
+        phaseTick = svcGetSystemTick();
         renderer->vtable->endFrame(renderer);
+        renderPerf.rendererEndMs = N3DSPerf_ticksToMs(svcGetSystemTick() - phaseTick);
+        // Cmd-buffer usage is meaningful while the current frame's command buffer is still bound.
+        renderPerf.cmdBufUsagePercent = (double) C3D_GetCmdBufUsage() * 100.0;
+
+        phaseTick = svcGetSystemTick();
         C3D_FrameEnd(0);
-        double frameRenderMs = N3DSPerf_ticksToMs(svcGetSystemTick() - renderStartTick);
-        N3DSDebugMonitor_tickFrame(&debugMonitor, frameRenderMs);
-        N3DSDustPerf_update(&gN3DSDustPerfSampler, runner, renderer, frameStepMs, frameRenderMs);
+        renderPerf.frameEndMs = N3DSPerf_ticksToMs(svcGetSystemTick() - phaseTick);
+        renderPerf.c3dProcessingMs = (double) C3D_GetProcessingTime();
+        renderPerf.totalMs = N3DSPerf_ticksToMs(svcGetSystemTick() - renderStartTick);
+
+        N3DSDebugMonitor_tickFrame(&debugMonitor, renderPerf.totalMs);
+        N3DSDustPerf_update(&gN3DSDustPerfSampler, runner, renderer, frameStepMs, &renderPerf);
 
         RunnerKeyboard_beginFrame(runner->keyboard);
         if (touchState.tapPulseFrames > 0u) touchState.tapPulseFrames--;
