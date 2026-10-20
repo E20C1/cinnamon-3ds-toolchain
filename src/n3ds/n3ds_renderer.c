@@ -2328,6 +2328,7 @@ static bool N3DSRenderer_tryLoadDirectSpriteImage(N3DSRenderer* renderer, int32_
     bool preferNamedButtonOverride = false;
     bool preferAttackTargetChoiceDirect = false;
     bool preferAttackTargetDirect = false;
+    bool preferAttackStrikeDirect = false;
 
     if (renderer->base.dataWin != NULL &&
         (uint32_t) spriteIndex < renderer->base.dataWin->sprt.count) {
@@ -2346,6 +2347,12 @@ static bool N3DSRenderer_tryLoadDirectSpriteImage(N3DSRenderer* renderer, int32_
             sprite->width == 546 &&
             sprite->height == 115 &&
             sprite->textureCount == 1;
+        preferAttackStrikeDirect =
+            spriteName != NULL &&
+            strcmp(spriteName, "spr_strike") == 0 &&
+            sprite->width == 14 &&
+            sprite->height == 12 &&
+            sprite->textureCount == 6;
         if (spriteName != NULL &&
             (strstr(spriteName, "spr_mainchara") != NULL ||
              strstr(spriteName, "spr_f_mainchara") != NULL ||
@@ -2367,7 +2374,10 @@ static bool N3DSRenderer_tryLoadDirectSpriteImage(N3DSRenderer* renderer, int32_
         N3DSDirectTextureAsset* existingFrameAsset = &spriteAsset->frameAssets[frameIndex];
         hasLoadedDirectFrame = existingFrameAsset->ready || (existingFrameAsset->blobData != NULL && existingFrameAsset->blobSize > 0);
     }
-    bool preferPinnedAttackDirect = preferAttackTargetChoiceDirect || preferAttackTargetDirect;
+    bool preferPinnedAttackDirect =
+        preferAttackTargetChoiceDirect ||
+        preferAttackTargetDirect ||
+        preferAttackStrikeDirect;
     bool allowColdDirectLoad = preferNamedButtonOverride || preferPinnedAttackDirect;
     if (!allowColdDirectLoad && !hasLoadedDirectSheet && !hasLoadedDirectFrame) {
         return false;
