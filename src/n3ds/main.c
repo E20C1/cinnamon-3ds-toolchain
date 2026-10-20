@@ -68,6 +68,23 @@ typedef struct {
     uint32_t spriteDrawCalls;
     uint32_t spritePartDrawCalls;
     uint32_t c2dFlushes;
+    uint32_t atlasBlobReads;
+    uint32_t directBlobReads;
+    uint32_t pageImports;
+    uint32_t pageEvictions;
+    uint32_t importFailures;
+    uint32_t directAssetLoads;
+    uint32_t textureSwitches;
+    int32_t targetChoiceObjectIndex;
+    uint32_t targetChoiceInstanceId;
+    int32_t targetChoiceSpriteIndex;
+    int32_t targetChoiceSubimg;
+    int32_t targetChoiceTPAGIndex;
+    float targetChoiceImageIndex;
+    float targetChoiceImageSpeed;
+    int32_t battleActive;
+    int32_t myFight;
+    int32_t mnFight;
     double stepMs;
     double prepMs;
     double eventMs;
@@ -118,6 +135,7 @@ typedef struct {
 } N3DSDustPerfSampler;
 
 static N3DSDustPerfSampler gN3DSDustPerfSampler;
+static N3DSDustPerfSampler gN3DSAttackPerfSampler;
 
 typedef struct {
     bool touchEnabled;
@@ -769,10 +787,30 @@ static double N3DSPerf_ticksToMs(u64 ticks) {
     return (double) ticks * 1000.0 / (double) SYSCLOCK_ARM11;
 }
 
+static Instance* N3DSDustPerf_findTargetChoice(Runner* runner) {
+    if (runner == NULL || runner->dataWin == NULL || runner->instances == NULL) return NULL;
+
+    repeat(arrlen(runner->instances), i) {
+        Instance* inst = runner->instances[i];
+        if (inst == NULL || inst->destroyed || !inst->active) continue;
+        if (inst->objectIndex < 0 || (uint32_t) inst->objectIndex >= runner->dataWin->objt.count) continue;
+
+        const char* objectName = runner->dataWin->objt.objects[inst->objectIndex].name;
+        if (objectName != NULL && strstr(objectName, "targetchoice") != NULL) return inst;
+    }
+    return NULL;
+}
+
 static N3DSDustPerfFrame N3DSDustPerf_captureFrame(Runner* runner, Renderer* renderer, double stepMs, const N3DSRenderPerfSample* renderPerf) {
     N3DSDustPerfFrame sample;
     memset(&sample, 0, sizeof(sample));
     sample.frame = runner != NULL ? runner->frameCount : -1;
+    sample.targetChoiceObjectIndex = -1;
+    sample.targetChoiceSpriteIndex = -1;
+    sample.targetChoiceSubimg = -1;
+    sample.targetChoiceTPAGIndex = -1;
+    sample.myFight = -1;
+    sample.mnFight = -1;
     sample.dustCount = Runner_get3DSObjectInstanceCountByName(runner, "obj_whtpxlgrav");
     if (runner != NULL) {
         sample.instancesCreated = runner->frameInstancesCreated;
@@ -802,10 +840,39 @@ static N3DSDustPerfFrame N3DSDustPerf_captureFrame(Runner* runner, Renderer* ren
         sample.topStepObjectIndex = runner->frameStepTopObjectIndex;
         sample.topStepObjectMs = runner->frameStepTopObjectMs;
         sample.topStepObjectCalls = runner->frameStepTopObjectCalls;
+
+        N3DSBattleMenuState battleState;
+        if (Runner_get3DSBattleMenuState(runner, &battleState)) {
+            sample.battleActive = battleState.battleActive ? 1 : 0;
+            sample.myFight = battleState.myFight;
+            sample.mnFight = battleState.mnFight;
+        }
+
+        Instance* targetChoice = N3DSDustPerf_findTargetChoice(runner);
+        if (targetChoice != NULL) {
+            sample.targetChoiceObjectIndex = targetChoice->objectIndex;
+            sample.targetChoiceInstanceId = targetChoice->instanceId;
+            sample.targetChoiceSpriteIndex = targetChoice->spriteIndex;
+            sample.targetChoiceImageIndex = targetChoice->imageIndex;
+            sample.targetChoiceImageSpeed = targetChoice->imageSpeed;
+            if (targetChoice->spriteIndex >= 0 &&
+                (uint32_t) targetChoice->spriteIndex < runner->dataWin->sprt.count) {
+                sample.targetChoiceSubimg = (int32_t) targetChoice->imageIndex;
+                sample.targetChoiceTPAGIndex = Renderer_resolveTPAGIndex(
+                    runner->dataWin, targetChoice->spriteIndex, sample.targetChoiceSubimg);
+            }
+        }
     }
     sample.spriteDrawCalls = N3DSRenderer_getFrameSpriteDrawCalls(renderer);
     sample.spritePartDrawCalls = N3DSRenderer_getFrameSpritePartDrawCalls(renderer);
     sample.c2dFlushes = N3DSRenderer_getFrameC2DFlushes(renderer);
+    sample.atlasBlobReads = N3DSRenderer_getFrameBlobReads(renderer);
+    sample.directBlobReads = N3DSRenderer_getFrameDirectBlobReads(renderer);
+    sample.pageImports = N3DSRenderer_getFramePageImports(renderer);
+    sample.pageEvictions = N3DSRenderer_getFramePageEvictions(renderer);
+    sample.importFailures = N3DSRenderer_getFrameImportFailures(renderer);
+    sample.directAssetLoads = N3DSRenderer_getFrameDirectAssetLoads(renderer);
+    sample.textureSwitches = N3DSRenderer_getFrameTextureSwitches(renderer);
     return sample;
 }
 
@@ -836,13 +903,18 @@ static void N3DSDustPerf_copyPreFrames(N3DSDustPerfSampler* sampler) {
     }
 }
 
-static const char* N3DSDustPerf_phaseName(int32_t phase) {
+static const char* N3DSPerf_phaseName(int32_t phase, const char* activePhaseName) {
     if (phase < 0) return "pre";
-    if (phase > 0) return "dust";
+    if (phase > 0) return activePhaseName != NULL ? activePhaseName : "active";
     return "post";
 }
 
-static void N3DSDustPerf_writeEvent(N3DSDustPerfSampler* sampler, Runner* runner) {
+static void N3DSPerf_writeEvent(
+    N3DSDustPerfSampler* sampler,
+    Runner* runner,
+    const char* eventName,
+    const char* activePhaseName
+) {
     if (sampler == NULL || sampler->sampleCount == 0) return;
     FILE* file = fopen(N3DS_DUST_PERF_LOG_PATH, "a");
     if (file == NULL) {
@@ -850,13 +922,17 @@ static void N3DSDustPerf_writeEvent(N3DSDustPerfSampler* sampler, Runner* runner
         return;
     }
 
-    fprintf(file, "# dust-event %lu samples=%lu truncated=%d\n",
+    fprintf(file, "# %s-event %lu samples=%lu truncated=%d\n",
+        eventName != NULL ? eventName : "perf",
         (unsigned long) sampler->eventId, (unsigned long) sampler->sampleCount, sampler->truncated ? 1 : 0);
     fputs(
         "frame,phase,dust,created,destroyed,draw_instances,step_ms,prep_ms,event_ms,motion_ms,"
         "collision_ms,cleanup_ms,finalize_ms,draw_instances_ms,battle_replay_ms,render_ms,"
         "frame_begin_ms,renderer_begin_ms,draw_views_ms,overlay_ms,renderer_end_ms,frame_end_ms,"
         "c3d_cpu_ms,gpu_prev_ms,cmd_buf_pct,sprite_calls,part_calls,c2d_flushes,"
+        "atlas_blob_reads,direct_blob_reads,page_imports,page_evictions,import_failures,"
+        "direct_asset_loads,texture_switches,target_object,target_name,target_instance,target_sprite,"
+        "target_subimg,target_tpag,target_image_index,target_image_speed,battle_active,myfight,mnfight,"
         "top_step_object,top_step_name,top_step_ms,top_step_calls\n", file);
 
     repeat(sampler->sampleCount, i) {
@@ -868,10 +944,17 @@ static void N3DSDustPerf_writeEvent(N3DSDustPerfSampler* sampler, Runner* runner
             if (candidate != NULL) topName = candidate;
         }
 
+        const char* targetName = "";
+        if (runner != NULL && sample->targetChoiceObjectIndex >= 0 &&
+            (uint32_t) sample->targetChoiceObjectIndex < runner->dataWin->objt.count) {
+            const char* candidate = runner->dataWin->objt.objects[sample->targetChoiceObjectIndex].name;
+            if (candidate != NULL) targetName = candidate;
+        }
+
         fprintf(file,
             "%ld,%s,%lu,%lu,%lu,%lu,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,"
-            "%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.2f,%lu,%lu,%lu,%ld,%s,%.3f,%lu\n",
-            (long) sample->frame, N3DSDustPerf_phaseName(sample->phase),
+            "%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.2f,%lu,%lu,%lu",
+            (long) sample->frame, N3DSPerf_phaseName(sample->phase, activePhaseName),
             (unsigned long) sample->dustCount, (unsigned long) sample->instancesCreated,
             (unsigned long) sample->instancesDestroyed, (unsigned long) sample->drawInstances,
             sample->stepMs, sample->prepMs, sample->eventMs, sample->motionMs, sample->collisionMs,
@@ -880,10 +963,23 @@ static void N3DSDustPerf_writeEvent(N3DSDustPerfSampler* sampler, Runner* runner
             sample->overlayMs, sample->rendererEndMs, sample->frameEndMs, sample->c3dProcessingMs,
             sample->previousGpuDrawingMs, sample->cmdBufUsagePercent,
             (unsigned long) sample->spriteDrawCalls, (unsigned long) sample->spritePartDrawCalls,
-            (unsigned long) sample->c2dFlushes, (long) sample->topStepObjectIndex, topName,
+            (unsigned long) sample->c2dFlushes);
+        fprintf(file,
+            ",%lu,%lu,%lu,%lu,%lu,%lu,%lu,%ld,%s,%lu,%ld,%ld,%ld,%.3f,%.3f,%ld,%ld,%ld",
+            (unsigned long) sample->atlasBlobReads, (unsigned long) sample->directBlobReads,
+            (unsigned long) sample->pageImports, (unsigned long) sample->pageEvictions,
+            (unsigned long) sample->importFailures, (unsigned long) sample->directAssetLoads,
+            (unsigned long) sample->textureSwitches, (long) sample->targetChoiceObjectIndex,
+            targetName, (unsigned long) sample->targetChoiceInstanceId,
+            (long) sample->targetChoiceSpriteIndex, (long) sample->targetChoiceSubimg,
+            (long) sample->targetChoiceTPAGIndex, (double) sample->targetChoiceImageIndex,
+            (double) sample->targetChoiceImageSpeed, (long) sample->battleActive,
+            (long) sample->myFight, (long) sample->mnFight);
+        fprintf(file, ",%ld,%s,%.3f,%lu\n",
+            (long) sample->topStepObjectIndex, topName,
             sample->topStepObjectMs, (unsigned long) sample->topStepObjectCalls);
     }
-    fputs("# end dust-event\n", file);
+    fprintf(file, "# end %s-event\n", eventName != NULL ? eventName : "perf");
     fclose(file);
 }
 
@@ -922,7 +1018,7 @@ static void N3DSDustPerf_update(
     if (sampler->postFramesRemaining > 0) sampler->postFramesRemaining--;
     if (sampler->postFramesRemaining > 0) return;
 
-    N3DSDustPerf_writeEvent(sampler, runner);
+    N3DSPerf_writeEvent(sampler, runner, "dust", "dust");
     sampler->active = false;
     sampler->truncated = false;
     sampler->sampleCount = 0;
@@ -932,7 +1028,58 @@ static void N3DSDustPerf_update(
 
 static void N3DSDustPerf_flushPending(N3DSDustPerfSampler* sampler, Runner* runner) {
     if (sampler == NULL || !sampler->active || sampler->sampleCount == 0) return;
-    N3DSDustPerf_writeEvent(sampler, runner);
+    N3DSPerf_writeEvent(sampler, runner, "dust", "dust");
+    sampler->active = false;
+    sampler->sampleCount = 0;
+}
+
+static void N3DSAttackPerf_update(
+    N3DSDustPerfSampler* sampler,
+    Runner* runner,
+    Renderer* renderer,
+    double stepMs,
+    const N3DSRenderPerfSample* renderPerf
+) {
+    if (sampler == NULL || runner == NULL || renderer == NULL) return;
+    N3DSDustPerfFrame sample = N3DSDustPerf_captureFrame(runner, renderer, stepMs, renderPerf);
+    bool attackActive = sample.battleActive != 0 && sample.myFight == 1;
+
+    if (!sampler->active) {
+        if (!attackActive) {
+            N3DSDustPerf_pushPreFrame(sampler, &sample);
+            return;
+        }
+        sampler->active = true;
+        sampler->truncated = false;
+        sampler->sampleCount = 0;
+        sampler->postFramesRemaining = N3DS_DUST_PERF_POST_FRAMES;
+        sampler->eventId++;
+        N3DSDustPerf_copyPreFrames(sampler);
+        sample.phase = 1;
+        N3DSDustPerf_appendSample(sampler, &sample);
+        return;
+    }
+
+    sample.phase = attackActive ? 1 : 0;
+    N3DSDustPerf_appendSample(sampler, &sample);
+    if (attackActive) {
+        sampler->postFramesRemaining = N3DS_DUST_PERF_POST_FRAMES;
+        return;
+    }
+    if (sampler->postFramesRemaining > 0) sampler->postFramesRemaining--;
+    if (sampler->postFramesRemaining > 0) return;
+
+    N3DSPerf_writeEvent(sampler, runner, "attack", "attack");
+    sampler->active = false;
+    sampler->truncated = false;
+    sampler->sampleCount = 0;
+    sampler->preCount = 0;
+    sampler->preWrite = 0;
+}
+
+static void N3DSAttackPerf_flushPending(N3DSDustPerfSampler* sampler, Runner* runner) {
+    if (sampler == NULL || !sampler->active || sampler->sampleCount == 0) return;
+    N3DSPerf_writeEvent(sampler, runner, "attack", "attack");
     sampler->active = false;
     sampler->sampleCount = 0;
 }
@@ -1949,12 +2096,14 @@ int main(int argc, char** argv) {
 
         N3DSDebugMonitor_tickFrame(&debugMonitor, renderPerf.totalMs);
         N3DSDustPerf_update(&gN3DSDustPerfSampler, runner, renderer, frameStepMs, &renderPerf);
+        N3DSAttackPerf_update(&gN3DSAttackPerfSampler, runner, renderer, frameStepMs, &renderPerf);
 
         RunnerKeyboard_beginFrame(runner->keyboard);
         if (touchState.tapPulseFrames > 0u) touchState.tapPulseFrames--;
     }
 
     N3DSDustPerf_flushPending(&gN3DSDustPerfSampler, runner);
+    N3DSAttackPerf_flushPending(&gN3DSAttackPerfSampler, runner);
 
     audioSystem->vtable->destroy(audioSystem);
     renderer->vtable->destroy(renderer);
