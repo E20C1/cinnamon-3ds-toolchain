@@ -5622,6 +5622,140 @@ const char* N3DSRenderer_getStartupError(Renderer* base) {
     return renderer->startupError;
 }
 
+static bool N3DSRenderer_hasPackedDirectAsset(const N3DSRenderer* renderer, const char* relativePath) {
+    if (renderer == NULL || relativePath == NULL || renderer->packedDirectAssetMap == NULL) return false;
+    return shgeti(renderer->packedDirectAssetMap, relativePath) >= 0;
+}
+
+static bool N3DSRenderer_matchesAttackDiagnosticSprite(const char* name) {
+    if (name == NULL) return false;
+    return strcmp(name, "spr_targetchoice") == 0 ||
+        strcmp(name, "spr_target") == 0 ||
+        strcmp(name, "spr_strike") == 0 ||
+        strcmp(name, "spr_dumbtarget") == 0;
+}
+
+static bool N3DSRenderer_isCanonicalAttackDirectSprite(const Sprite* sprite) {
+    if (sprite == NULL || sprite->name == NULL) return false;
+    if (strcmp(sprite->name, "spr_targetchoice") == 0) {
+        return sprite->width == 14 && sprite->height == 128 && sprite->textureCount == 2;
+    }
+    if (strcmp(sprite->name, "spr_target") == 0) {
+        return sprite->width == 546 && sprite->height == 115 && sprite->textureCount == 1;
+    }
+    if (strcmp(sprite->name, "spr_strike") == 0) {
+        return sprite->width == 14 && sprite->height == 12 && sprite->textureCount == 6;
+    }
+    return false;
+}
+
+void N3DSRenderer_writeAttackDirectDiagnostic(Renderer* base, FILE* file) {
+    if (base == NULL || file == NULL || base->dataWin == NULL) return;
+
+    N3DSRenderer* renderer = (N3DSRenderer*) base;
+    DataWin* dw = base->dataWin;
+    char line[768];
+
+    snprintf(
+        line,
+        sizeof(line),
+        "# attack-direct-diag-begin packed_map=%d packed_file=%d direct_sprite_count=%lu\n",
+        renderer->packedDirectAssetMap != NULL ? 1 : 0,
+        renderer->packedDirectAssetFile != NULL ? 1 : 0,
+        (unsigned long) renderer->directSpriteAssetCount
+    );
+    fputs(line, file);
+
+    repeat(dw->sprt.count, spriteIndex) {
+        Sprite* sprite = &dw->sprt.sprites[spriteIndex];
+        if (!N3DSRenderer_matchesAttackDiagnosticSprite(sprite->name)) continue;
+
+        char sheetPath[256];
+        char resolvedSheetPath[512];
+        snprintf(sheetPath, sizeof(sheetPath), "sprites/spr_%05lu.t3x", (unsigned long) spriteIndex);
+        bool packedSheet = N3DSRenderer_hasPackedDirectAsset(renderer, sheetPath);
+        bool looseSheet = N3DSRenderer_resolveAssetPath(renderer, sheetPath, resolvedSheetPath, sizeof(resolvedSheetPath));
+
+        uint32_t packedFrames = 0;
+        uint32_t looseFrames = 0;
+        repeat(sprite->textureCount, frameIndex) {
+            char framePath[256];
+            char resolvedFramePath[512];
+            snprintf(
+                framePath,
+                sizeof(framePath),
+                "sprites/spr_%05lu_frame_%05zu.t3x",
+                (unsigned long) spriteIndex,
+                frameIndex
+            );
+            if (N3DSRenderer_hasPackedDirectAsset(renderer, framePath)) packedFrames++;
+            if (N3DSRenderer_resolveAssetPath(renderer, framePath, resolvedFramePath, sizeof(resolvedFramePath))) looseFrames++;
+        }
+
+        N3DSDirectSpriteAsset* directAsset =
+            (uint32_t) spriteIndex < renderer->directSpriteAssetCount
+                ? &renderer->directSpriteAssets[spriteIndex]
+                : NULL;
+
+        snprintf(
+            line,
+            sizeof(line),
+            "# attack-direct-diag sprite=%lu name=%s width=%lu height=%lu textures=%lu canonical=%d "
+            "packed_sheet=%d loose_sheet=%d packed_frames=%lu loose_frames=%lu "
+            "sheet_attempted=%d sheet_ready=%d sheet_failed=%d sheet_frames=%lu use_frame_fallback=%d\n",
+            (unsigned long) spriteIndex,
+            sprite->name != NULL ? sprite->name : "",
+            (unsigned long) sprite->width,
+            (unsigned long) sprite->height,
+            (unsigned long) sprite->textureCount,
+            N3DSRenderer_isCanonicalAttackDirectSprite(sprite) ? 1 : 0,
+            packedSheet ? 1 : 0,
+            looseSheet ? 1 : 0,
+            (unsigned long) packedFrames,
+            (unsigned long) looseFrames,
+            directAsset != NULL && directAsset->sheetLoadAttempted ? 1 : 0,
+            directAsset != NULL && directAsset->sheetAsset.ready ? 1 : 0,
+            directAsset != NULL && directAsset->sheetAsset.failed ? 1 : 0,
+            directAsset != NULL ? (unsigned long) directAsset->sheetFrameCount : 0ul,
+            directAsset != NULL && directAsset->useFrameFallback ? 1 : 0
+        );
+        fputs(line, file);
+
+        repeat(sprite->textureCount, frameIndex) {
+            int32_t tpagIndex = sprite->tpagIndices != NULL ? sprite->tpagIndices[frameIndex] : -1;
+            int32_t ownerSpriteIndex = -1;
+            int32_t ownerFrameIndex = -1;
+            const char* ownerName = "";
+            if (tpagIndex >= 0 && (uint32_t) tpagIndex < dw->tpag.count) {
+                if (renderer->tpagToSpriteIndex != NULL) ownerSpriteIndex = renderer->tpagToSpriteIndex[tpagIndex];
+                if (renderer->tpagToSpriteFrameIndex != NULL) ownerFrameIndex = renderer->tpagToSpriteFrameIndex[tpagIndex];
+                if (ownerSpriteIndex >= 0 && (uint32_t) ownerSpriteIndex < dw->sprt.count) {
+                    const char* candidate = dw->sprt.sprites[ownerSpriteIndex].name;
+                    if (candidate != NULL) ownerName = candidate;
+                }
+            }
+
+            snprintf(
+                line,
+                sizeof(line),
+                "# attack-direct-frame sprite=%lu name=%s frame=%lu tpag=%ld owner_sprite=%ld owner_name=%s "
+                "owner_frame=%ld owner_matches=%d\n",
+                (unsigned long) spriteIndex,
+                sprite->name != NULL ? sprite->name : "",
+                (unsigned long) frameIndex,
+                (long) tpagIndex,
+                (long) ownerSpriteIndex,
+                ownerName,
+                (long) ownerFrameIndex,
+                ownerSpriteIndex == (int32_t) spriteIndex ? 1 : 0
+            );
+            fputs(line, file);
+        }
+    }
+
+    fputs("# attack-direct-diag-end\n", file);
+}
+
 uint32_t N3DSRenderer_getResidentAtlasVRAMBytes(Renderer* base) {
     if (base == NULL) return 0;
     return ((N3DSRenderer*) base)->residentAtlasVRAMBytes;
