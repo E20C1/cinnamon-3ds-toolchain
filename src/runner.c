@@ -43,10 +43,6 @@ bool N3DSRenderer_drawCachedTileEntry(Renderer* renderer, int32_t tileEntryIndex
 int32_t N3DSRenderer_createTileLayerChunkCache(Renderer* renderer, int32_t roomWidth, int32_t roomHeight, const TileLayerRenderCache* cache);
 bool N3DSRenderer_drawTileLayerChunkCache(Renderer* renderer, int32_t cacheId, float layerOffsetX, float layerOffsetY, float alpha);
 void N3DSRenderer_destroyTileLayerChunkCache(Renderer* renderer, int32_t cacheId);
-uint32_t N3DSRenderer_getFramePageImports(Renderer* renderer);
-uint32_t N3DSRenderer_getFramePageEvictions(Renderer* renderer);
-uint32_t N3DSRenderer_getFramePageImportEventCount(Renderer* renderer);
-bool N3DSRenderer_getFramePageImportEvent(Renderer* renderer, uint32_t eventIndex, uint16_t* outPageIndex, int32_t* outTPAGIndex);
 #endif
 
 #define RoomLayerType_Path 0
@@ -72,76 +68,6 @@ static double Runner_nowMs(void) {
 }
 
 #ifdef __3DS__
-enum {
-    N3DS_ATLAS_IMPORT_PASS_MAIN = 1u,
-    N3DS_ATLAS_IMPORT_PASS_BATTLE_REPLAY = 2u,
-};
-
-static void Runner_capture3DSAtlasImportAttribution(
-    Runner* runner,
-    Instance* inst,
-    uint32_t beforeImports,
-    uint32_t beforeEvictions,
-    uint32_t beforeEventCount,
-    uint32_t pass
-) {
-    if (runner == NULL || runner->renderer == NULL || inst == NULL) return;
-
-    uint32_t afterImports = N3DSRenderer_getFramePageImports(runner->renderer);
-    if (afterImports <= beforeImports) return;
-
-    uint32_t afterEvictions = N3DSRenderer_getFramePageEvictions(runner->renderer);
-    uint32_t importDelta = afterImports - beforeImports;
-    uint32_t evictionDelta = afterEvictions >= beforeEvictions ? afterEvictions - beforeEvictions : 0u;
-    if (importDelta < runner->frameDrawTopImportCount ||
-        (importDelta == runner->frameDrawTopImportCount &&
-         evictionDelta <= runner->frameDrawTopImportEvictions)) return;
-
-    uint32_t afterEventCount = N3DSRenderer_getFramePageImportEventCount(runner->renderer);
-    int32_t dominantTPAG = -1;
-    uint32_t dominantCount = 0;
-    if (afterEventCount > beforeEventCount) {
-        for (uint32_t eventIndex = beforeEventCount; eventIndex < afterEventCount; ++eventIndex) {
-            int32_t candidateTPAG = -1;
-            if (!N3DSRenderer_getFramePageImportEvent(runner->renderer, eventIndex, NULL, &candidateTPAG)) continue;
-            uint32_t candidateCount = 0;
-            for (uint32_t countIndex = beforeEventCount; countIndex < afterEventCount; ++countIndex) {
-                int32_t otherTPAG = -1;
-                if (N3DSRenderer_getFramePageImportEvent(runner->renderer, countIndex, NULL, &otherTPAG) &&
-                    otherTPAG == candidateTPAG) candidateCount++;
-            }
-            if (candidateCount > dominantCount) {
-                dominantCount = candidateCount;
-                dominantTPAG = candidateTPAG;
-            }
-        }
-    }
-
-    runner->frameDrawTopImportObjectIndex = inst->objectIndex;
-    runner->frameDrawTopImportInstanceId = inst->instanceId;
-    runner->frameDrawTopImportInstanceSpriteIndex = inst->spriteIndex;
-    runner->frameDrawTopImportInstanceSubimg = (int32_t) inst->imageIndex;
-    runner->frameDrawTopImportInstanceTPAGIndex =
-        inst->spriteIndex >= 0
-            ? Renderer_resolveTPAGIndex(runner->dataWin, inst->spriteIndex, (int32_t) inst->imageIndex)
-            : -1;
-    runner->frameDrawTopImportTriggerTPAGIndex = dominantTPAG;
-    runner->frameDrawTopImportCount = importDelta;
-    runner->frameDrawTopImportEvictions = evictionDelta;
-    runner->frameDrawTopImportPass = pass;
-    runner->frameDrawTopImportPageCount = 0;
-
-    if (afterEventCount > beforeEventCount) {
-        for (uint32_t eventIndex = beforeEventCount;
-             eventIndex < afterEventCount && runner->frameDrawTopImportPageCount < 16u;
-             ++eventIndex) {
-            uint16_t pageIndex = UINT16_MAX;
-            if (!N3DSRenderer_getFramePageImportEvent(runner->renderer, eventIndex, &pageIndex, NULL)) continue;
-            runner->frameDrawTopImportPages[runner->frameDrawTopImportPageCount++] = pageIndex;
-        }
-    }
-}
-
 static bool Runner_isOld3DSLike(void) {
     static bool initialized = false;
     static bool old3DSLike = true;
@@ -998,9 +924,6 @@ static void Runner_draw3DSBottomBattleUI(Runner* runner, Drawable* drawables, in
         int32_t codeId = slot >= 0
             ? ResolvedEventTable_lookup(&runner->eventTable, inst->objectIndex, slot, &ownerObjectIndex)
             : -1;
-        uint32_t importStart = N3DSRenderer_getFramePageImports(runner->renderer);
-        uint32_t evictionStart = N3DSRenderer_getFramePageEvictions(runner->renderer);
-        uint32_t importEventStart = N3DSRenderer_getFramePageImportEventCount(runner->renderer);
         if (codeId >= 0) {
             Runner_executeResolvedEvent(runner, inst, EVENT_DRAW, subtype, codeId, ownerObjectIndex);
         } else {
@@ -1008,9 +931,6 @@ static void Runner_draw3DSBottomBattleUI(Runner* runner, Drawable* drawables, in
                 Renderer_drawSelf(runner->renderer, inst);
             }
         }
-        Runner_capture3DSAtlasImportAttribution(
-            runner, inst, importStart, evictionStart, importEventStart, N3DS_ATLAS_IMPORT_PASS_BATTLE_REPLAY
-        );
     }
     N3DSRenderer_endBottomScreenGUI(runner->renderer);
 }
@@ -1915,18 +1835,6 @@ void Runner_resetFrameDrawStats(Runner* runner) {
     runner->frameDrawGuiMs = 0.0;
     runner->frameDrawGuiEventMs = 0.0;
     runner->frameDrawBattleReplayMs = 0.0;
-#ifdef __3DS__
-    runner->frameDrawTopImportObjectIndex = -1;
-    runner->frameDrawTopImportInstanceId = 0;
-    runner->frameDrawTopImportInstanceSpriteIndex = -1;
-    runner->frameDrawTopImportInstanceSubimg = -1;
-    runner->frameDrawTopImportInstanceTPAGIndex = -1;
-    runner->frameDrawTopImportTriggerTPAGIndex = -1;
-    runner->frameDrawTopImportCount = 0;
-    runner->frameDrawTopImportEvictions = 0;
-    runner->frameDrawTopImportPass = 0;
-    runner->frameDrawTopImportPageCount = 0;
-#endif
 }
 
 // Returns true if "drawables" is already in compareDrawableDepth order. Used by the sort-dirty path to skip qsort when small depth perturbations didn't actually cross any neighbor.
@@ -2218,11 +2126,6 @@ void Runner_draw(Runner* runner) {
                 inst->y += k3DSTopBattleEnemyInstanceYOffset;
             }
 #endif
-#ifdef __3DS__
-            uint32_t importStart = runner->renderer != nullptr ? N3DSRenderer_getFramePageImports(runner->renderer) : 0u;
-            uint32_t evictionStart = runner->renderer != nullptr ? N3DSRenderer_getFramePageEvictions(runner->renderer) : 0u;
-            uint32_t importEventStart = runner->renderer != nullptr ? N3DSRenderer_getFramePageImportEventCount(runner->renderer) : 0u;
-#endif
             if (codeId >= 0) {
                 Runner_executeResolvedEvent(runner, inst, EVENT_DRAW, DRAW_NORMAL, codeId, ownerObjectIndex);
             } else if (runner->renderer != nullptr) {
@@ -2238,9 +2141,6 @@ void Runner_draw(Runner* runner) {
             if (offsetTopBattleEnemy) {
                 inst->y = savedY;
             }
-            Runner_capture3DSAtlasImportAttribution(
-                runner, inst, importStart, evictionStart, importEventStart, N3DS_ATLAS_IMPORT_PASS_MAIN
-            );
 #endif
             runner->frameDrawInstances++;
             runner->frameDrawInstancesMs += Runner_nowMs() - drawStartMs;
