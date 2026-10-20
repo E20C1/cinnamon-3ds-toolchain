@@ -69,6 +69,12 @@ typedef struct {
     uint32_t spriteDrawCalls;
     uint32_t spritePartDrawCalls;
     uint32_t c2dFlushes;
+    uint32_t residentAtlasVRAMBytes;
+    uint32_t residentAtlasVRAMLimitBytes;
+    uint32_t residentAtlasPageCount;
+    uint32_t residentAtlasPageLimit;
+    uint32_t residentDirectVRAMBytes;
+    uint32_t residentDirectVRAMLimitBytes;
     uint32_t atlasBlobReads;
     uint32_t directBlobReads;
     uint32_t pageImports;
@@ -909,6 +915,12 @@ static N3DSDustPerfFrame N3DSDustPerf_captureFrame(Runner* runner, Renderer* ren
     sample.spriteDrawCalls = N3DSRenderer_getFrameSpriteDrawCalls(renderer);
     sample.spritePartDrawCalls = N3DSRenderer_getFrameSpritePartDrawCalls(renderer);
     sample.c2dFlushes = N3DSRenderer_getFrameC2DFlushes(renderer);
+    sample.residentAtlasVRAMBytes = N3DSRenderer_getResidentAtlasVRAMBytes(renderer);
+    sample.residentAtlasVRAMLimitBytes = N3DSRenderer_getResidentAtlasVRAMLimitBytes(renderer);
+    sample.residentAtlasPageCount = N3DSRenderer_getResidentAtlasPageCount(renderer);
+    sample.residentAtlasPageLimit = N3DSRenderer_getResidentAtlasPageLimit(renderer);
+    sample.residentDirectVRAMBytes = N3DSRenderer_getResidentDirectAssetVRAMBytes(renderer);
+    sample.residentDirectVRAMLimitBytes = N3DSRenderer_getResidentDirectAssetVRAMLimitBytes(renderer);
     sample.atlasBlobReads = N3DSRenderer_getFrameBlobReads(renderer);
     sample.directBlobReads = N3DSRenderer_getFrameDirectBlobReads(renderer);
     sample.pageImports = N3DSRenderer_getFramePageImports(renderer);
@@ -988,6 +1000,7 @@ static void N3DSPerf_writeEvent(
         "collision_ms,cleanup_ms,finalize_ms,draw_instances_ms,battle_replay_ms,render_ms,"
         "frame_begin_ms,renderer_begin_ms,draw_views_ms,overlay_ms,renderer_end_ms,frame_end_ms,"
         "c3d_cpu_ms,gpu_prev_ms,cmd_buf_pct,sprite_calls,part_calls,c2d_flushes,"
+        "atlas_vram_bytes,atlas_vram_limit,atlas_resident_pages,atlas_page_limit,direct_vram_bytes,direct_vram_limit,"
         "atlas_blob_reads,direct_blob_reads,page_imports,page_evictions,import_failures,"
         "direct_asset_loads,direct_load_kind,direct_load_index,direct_load_frame,direct_load_vram_bytes,"
         "direct_load_cached_blob,texture_switches,atlas_object,atlas_object_name,atlas_instance,"
@@ -1040,10 +1053,10 @@ static void N3DSPerf_writeEvent(
             if (written > 0 && (size_t) written < sizeof(atlasPages) - atlasPagesCursor) {
                 atlasPagesCursor += (size_t) written;
             }
-            const char* formatName = runner != NULL
+            const char* formatName = runner != NULL && runner->renderer != NULL
                 ? N3DSRenderer_getAtlasPageFormatName(runner->renderer, importedPage)
                 : "unknown";
-            uint32_t pageVRAMBytes = runner != NULL
+            uint32_t pageVRAMBytes = runner != NULL && runner->renderer != NULL
                 ? N3DSRenderer_getAtlasPageVRAMBytes(runner->renderer, importedPage)
                 : 0u;
             written = snprintf(
@@ -1072,6 +1085,14 @@ static void N3DSPerf_writeEvent(
             sample->previousGpuDrawingMs, sample->cmdBufUsagePercent,
             (unsigned long) sample->spriteDrawCalls, (unsigned long) sample->spritePartDrawCalls,
             (unsigned long) sample->c2dFlushes);
+        fprintf(file,
+            ",%lu,%lu,%lu,%lu,%lu,%lu",
+            (unsigned long) sample->residentAtlasVRAMBytes,
+            (unsigned long) sample->residentAtlasVRAMLimitBytes,
+            (unsigned long) sample->residentAtlasPageCount,
+            (unsigned long) sample->residentAtlasPageLimit,
+            (unsigned long) sample->residentDirectVRAMBytes,
+            (unsigned long) sample->residentDirectVRAMLimitBytes);
         fprintf(file,
             ",%lu,%lu,%lu,%lu,%lu,%lu,%s,%ld,%ld,%lu,%ld,%lu",
             (unsigned long) sample->atlasBlobReads, (unsigned long) sample->directBlobReads,
