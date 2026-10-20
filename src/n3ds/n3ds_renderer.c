@@ -59,6 +59,7 @@
 #define N3DS_PREWARM_BLOB_BYTES_NEW3DS (12u * 1024u * 1024u)
 #define N3DS_RESIDENT_ATLAS_VRAM_BUDGET_OLD3DS (2560u * 1024u)
 #define N3DS_RESIDENT_ATLAS_VRAM_BUDGET_NEW3DS (5120u * 1024u)
+#define N3DS_FRAME_PAGE_IMPORT_EVENT_CAP 64u
 #define N3DS_MAX_CACHED_T3X_BYTES_OLD3DS (16u * 1024u * 1024u)
 #define N3DS_MAX_CACHED_T3X_BYTES_NEW3DS (24u * 1024u * 1024u)
 #define N3DS_MAX_CACHED_DIRECT_T3X_BYTES_OLD3DS (4u * 1024u * 1024u)
@@ -347,6 +348,10 @@ typedef struct N3DSRenderer {
     uint32_t frameDirectBlobReads;
     uint32_t framePageImports;
     uint32_t framePageEvictions;
+    uint32_t framePageImportEventCount;
+    uint16_t framePageImportEventPages[N3DS_FRAME_PAGE_IMPORT_EVENT_CAP];
+    int32_t framePageImportEventTPAGs[N3DS_FRAME_PAGE_IMPORT_EVENT_CAP];
+    int32_t currentImportTPAGIndex;
     uint32_t frameImportFailures;
     uint32_t frameImportEvictions;
     uint32_t frameFragmentDraws;
@@ -796,11 +801,23 @@ static double N3DSRenderer_ticksToMs(u64 ticks) {
     return (double) ticks * 1000.0 / (double) SYSCLOCK_ARM11;
 }
 
+static void N3DSRenderer_recordPageImport(N3DSRenderer* renderer, N3DSLoadedAtlasPage* page) {
+    if (renderer == NULL || page == NULL) return;
+    renderer->framePageImports++;
+    if (renderer->framePageImportEventCount >= N3DS_FRAME_PAGE_IMPORT_EVENT_CAP) return;
+    uint32_t pageIndex = (uint32_t) (page - renderer->atlasPages);
+    uint32_t eventIndex = renderer->framePageImportEventCount++;
+    renderer->framePageImportEventPages[eventIndex] = pageIndex <= UINT16_MAX ? (uint16_t) pageIndex : UINT16_MAX;
+    renderer->framePageImportEventTPAGs[eventIndex] = renderer->currentImportTPAGIndex;
+}
+
 static void N3DSRenderer_resetFramePerfCounters(N3DSRenderer* renderer) {
     renderer->frameBlobReads = 0;
     renderer->frameDirectBlobReads = 0;
     renderer->framePageImports = 0;
     renderer->framePageEvictions = 0;
+    renderer->framePageImportEventCount = 0;
+    renderer->currentImportTPAGIndex = -1;
     renderer->frameImportFailures = 0;
     renderer->frameImportEvictions = 0;
     renderer->frameFragmentDraws = 0;
@@ -1628,7 +1645,7 @@ static bool N3DSRenderer_loadIndexed8Page(N3DSRenderer* renderer, N3DSLoadedAtla
     C3D_TexFlush(&page->texture);
     linearFree(expanded);
     page->ready = true;
-    renderer->framePageImports++;
+    N3DSRenderer_recordPageImport(renderer, page);
     return true;
 }
 
@@ -1685,7 +1702,7 @@ static bool N3DSRenderer_loadPage(N3DSRenderer* renderer, uint32_t pageIndex) {
     C3D_TexSetFilter(&page->texture, GPU_NEAREST, GPU_NEAREST);
     C3D_TexSetWrap(&page->texture, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
     page->ready = true;
-    renderer->framePageImports++;
+    N3DSRenderer_recordPageImport(renderer, page);
     return true;
 }
 
@@ -2936,6 +2953,7 @@ static bool N3DSRenderer_loadAtlas(N3DSRenderer* renderer) {
 static bool N3DSRenderer_resolveImage(N3DSRenderer* renderer, int32_t tpagIndex, C2D_Image* outImage, Tex3DS_SubTexture* subtex) {
     if (N3DSRenderer_isFragmentedAtlasVersion(renderer->atlasVersion)) return false;
     if (tpagIndex < 0 || (uint32_t) tpagIndex >= renderer->atlasItemCount) return false;
+    renderer->currentImportTPAGIndex = tpagIndex;
     N3DSAtlasItem* item = &renderer->atlasItems[tpagIndex];
     if ((uint32_t) item->atlasId >= renderer->atlasPageCount) return false;
     if (!N3DSRenderer_ensurePageLoaded(renderer, item->atlasId)) return false;
@@ -3973,6 +3991,7 @@ static bool N3DSRenderer_tryResolveSingleFragmentFontPage(N3DSRenderer* renderer
     if (!N3DSRenderer_isFragmentedAtlasVersion(renderer->atlasVersion)) return false;
     if (tpagIndex < 0 || (uint32_t) tpagIndex >= renderer->atlasItemCount) return false;
 
+    renderer->currentImportTPAGIndex = tpagIndex;
     N3DSAtlasItemV3* item = &renderer->atlasItemsV3[tpagIndex];
     if (item->fragmentCount != 1) return false;
 
@@ -4002,6 +4021,7 @@ static void N3DSRenderer_drawSprite(Renderer* base, int32_t tpagIndex, float x, 
     TexturePageItem* tpag = &dw->tpag.items[tpagIndex];
 
     N3DSRenderer* renderer = (N3DSRenderer*) base;
+    renderer->currentImportTPAGIndex = tpagIndex;
     N3DSRenderer_traceBattleSprite(
         renderer,
         "sprite",
@@ -4105,6 +4125,7 @@ static void N3DSRenderer_drawSpritePart(Renderer* base, int32_t tpagIndex, int32
     }
 
     N3DSRenderer* renderer = (N3DSRenderer*) base;
+    renderer->currentImportTPAGIndex = tpagIndex;
     N3DSRenderer_traceBattleSprite(
         renderer,
         "sprite_part",
@@ -4533,6 +4554,7 @@ static void N3DSRenderer_drawTiled(Renderer* base, int32_t tpagIndex, float orig
     }
 
     N3DSRenderer* renderer = (N3DSRenderer*) base;
+    renderer->currentImportTPAGIndex = tpagIndex;
     if (tpagIndex < 0 || (uint32_t) tpagIndex >= base->dataWin->tpag.count) return;
     TexturePageItem* tpag = &base->dataWin->tpag.items[tpagIndex];
     if (tpag->boundingWidth == 0 || tpag->boundingHeight == 0) return;
@@ -4696,6 +4718,7 @@ static void N3DSRenderer_drawTiledPart(Renderer* base, int32_t tpagIndex, int32_
     }
 
     N3DSRenderer* renderer = (N3DSRenderer*) base;
+    renderer->currentImportTPAGIndex = tpagIndex;
     int32_t cropX = 0;
     int32_t cropY = 0;
     int32_t cropW = 0;
@@ -5671,6 +5694,34 @@ uint32_t N3DSRenderer_getFramePageImports(Renderer* base) {
 uint32_t N3DSRenderer_getFramePageEvictions(Renderer* base) {
     if (base == NULL) return 0;
     return ((N3DSRenderer*) base)->framePageEvictions;
+}
+
+uint32_t N3DSRenderer_getFramePageImportEventCount(Renderer* base) {
+    if (base == NULL) return 0;
+    return ((N3DSRenderer*) base)->framePageImportEventCount;
+}
+
+bool N3DSRenderer_getFramePageImportEvent(Renderer* base, uint32_t eventIndex, uint16_t* outPageIndex, int32_t* outTPAGIndex) {
+    if (base == NULL) return false;
+    N3DSRenderer* renderer = (N3DSRenderer*) base;
+    if (eventIndex >= renderer->framePageImportEventCount) return false;
+    if (outPageIndex != NULL) *outPageIndex = renderer->framePageImportEventPages[eventIndex];
+    if (outTPAGIndex != NULL) *outTPAGIndex = renderer->framePageImportEventTPAGs[eventIndex];
+    return true;
+}
+
+int32_t N3DSRenderer_getSpriteIndexForTPAG(Renderer* base, int32_t tpagIndex) {
+    if (base == NULL) return -1;
+    N3DSRenderer* renderer = (N3DSRenderer*) base;
+    if (renderer->tpagToSpriteIndex == NULL || tpagIndex < 0 || (uint32_t) tpagIndex >= renderer->baseTPAGCount) return -1;
+    return renderer->tpagToSpriteIndex[tpagIndex];
+}
+
+int32_t N3DSRenderer_getSpriteFrameIndexForTPAG(Renderer* base, int32_t tpagIndex) {
+    if (base == NULL) return -1;
+    N3DSRenderer* renderer = (N3DSRenderer*) base;
+    if (renderer->tpagToSpriteFrameIndex == NULL || tpagIndex < 0 || (uint32_t) tpagIndex >= renderer->baseTPAGCount) return -1;
+    return renderer->tpagToSpriteFrameIndex[tpagIndex];
 }
 
 uint32_t N3DSRenderer_getFrameImportFailures(Renderer* base) {
