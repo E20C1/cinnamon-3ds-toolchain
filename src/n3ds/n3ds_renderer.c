@@ -2327,6 +2327,7 @@ static bool N3DSRenderer_tryLoadDirectSpriteImage(N3DSRenderer* renderer, int32_
     const char* spriteName = NULL;
     bool preferNamedButtonOverride = false;
     bool preferAttackTargetChoiceDirect = false;
+    bool preferAttackTargetDirect = false;
 
     if (renderer->base.dataWin != NULL &&
         (uint32_t) spriteIndex < renderer->base.dataWin->sprt.count) {
@@ -2339,6 +2340,12 @@ static bool N3DSRenderer_tryLoadDirectSpriteImage(N3DSRenderer* renderer, int32_
             sprite->width == 14 &&
             sprite->height == 128 &&
             sprite->textureCount == 2;
+        preferAttackTargetDirect =
+            spriteName != NULL &&
+            strcmp(spriteName, "spr_target") == 0 &&
+            sprite->width == 546 &&
+            sprite->height == 115 &&
+            sprite->textureCount == 1;
         if (spriteName != NULL &&
             (strstr(spriteName, "spr_mainchara") != NULL ||
              strstr(spriteName, "spr_f_mainchara") != NULL ||
@@ -2360,7 +2367,8 @@ static bool N3DSRenderer_tryLoadDirectSpriteImage(N3DSRenderer* renderer, int32_
         N3DSDirectTextureAsset* existingFrameAsset = &spriteAsset->frameAssets[frameIndex];
         hasLoadedDirectFrame = existingFrameAsset->ready || (existingFrameAsset->blobData != NULL && existingFrameAsset->blobSize > 0);
     }
-    bool allowColdDirectLoad = preferNamedButtonOverride || preferAttackTargetChoiceDirect;
+    bool preferPinnedAttackDirect = preferAttackTargetChoiceDirect || preferAttackTargetDirect;
+    bool allowColdDirectLoad = preferNamedButtonOverride || preferPinnedAttackDirect;
     if (!allowColdDirectLoad && !hasLoadedDirectSheet && !hasLoadedDirectFrame) {
         return false;
     }
@@ -2415,7 +2423,7 @@ static bool N3DSRenderer_tryLoadDirectSpriteImage(N3DSRenderer* renderer, int32_
     if (sheetAsset->ready && (uint32_t) frameIndex < spriteAsset->sheetFrameCount) {
         sheetAsset->lastUsedStamp = ++renderer->directAssetUseCounter;
         sheetAsset->lastUsedFrame = renderer->frameSequence;
-        if (preferAttackTargetChoiceDirect) sheetAsset->pinned = true;
+        if (preferPinnedAttackDirect) sheetAsset->pinned = true;
         N3DSRenderer_buildSheetFrameImages(spriteAsset);
         if (spriteAsset->sheetFrameImages != NULL) {
             *outImage = &spriteAsset->sheetFrameImages[frameIndex];
@@ -2434,7 +2442,7 @@ static bool N3DSRenderer_tryLoadDirectSpriteImage(N3DSRenderer* renderer, int32_
             if ((uint32_t) frameIndex < spriteAsset->sheetFrameCount) {
                 sheetAsset->lastUsedStamp = ++renderer->directAssetUseCounter;
                 sheetAsset->lastUsedFrame = renderer->frameSequence;
-                if (preferAttackTargetChoiceDirect) sheetAsset->pinned = true;
+                if (preferPinnedAttackDirect) sheetAsset->pinned = true;
                 N3DSRenderer_buildSheetFrameImages(spriteAsset);
                 if (spriteAsset->sheetFrameImages != NULL) {
                     *outImage = &spriteAsset->sheetFrameImages[frameIndex];
@@ -2453,7 +2461,7 @@ static bool N3DSRenderer_tryLoadDirectSpriteImage(N3DSRenderer* renderer, int32_
     if (frameAsset->ready) {
         frameAsset->lastUsedStamp = ++renderer->directAssetUseCounter;
         frameAsset->lastUsedFrame = renderer->frameSequence;
-        if (preferAttackTargetChoiceDirect) frameAsset->pinned = true;
+        if (preferPinnedAttackDirect) frameAsset->pinned = true;
         *outImage = &frameAsset->image;
         return true;
     }
@@ -2462,7 +2470,7 @@ static bool N3DSRenderer_tryLoadDirectSpriteImage(N3DSRenderer* renderer, int32_
     char fallbackPath[256];
     snprintf(fallbackPath, sizeof(fallbackPath), "sprites/spr_%05d_frame_%05d.t3x", (int) spriteIndex, (int) frameIndex);
     if (!N3DSRenderer_loadDirectTextureAsset(renderer, frameAsset, fallbackPath)) return false;
-    if (preferAttackTargetChoiceDirect) frameAsset->pinned = true;
+    if (preferPinnedAttackDirect) frameAsset->pinned = true;
     *outImage = &frameAsset->image;
     return true;
 }
