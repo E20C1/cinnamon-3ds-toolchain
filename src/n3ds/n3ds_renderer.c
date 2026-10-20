@@ -359,6 +359,11 @@ typedef struct N3DSRenderer {
     uint32_t frameSpritePartDrawCalls;
     uint32_t frameDirectSpriteHits;
     uint32_t frameDirectAssetLoads;
+    uint32_t frameDirectLastLoadKind;
+    int32_t frameDirectLastLoadIndex;
+    int32_t frameDirectLastLoadFrame;
+    uint32_t frameDirectLastLoadVRAMBytes;
+    bool frameDirectLastLoadUsedCachedBlob;
     uint32_t frameTextureSwitches;
     uint32_t frameTextGlyphDraws;
     uint32_t frameTextTenthsMs;
@@ -825,6 +830,11 @@ static void N3DSRenderer_resetFramePerfCounters(N3DSRenderer* renderer) {
     renderer->frameSpritePartDrawCalls = 0;
     renderer->frameDirectSpriteHits = 0;
     renderer->frameDirectAssetLoads = 0;
+    renderer->frameDirectLastLoadKind = 0;
+    renderer->frameDirectLastLoadIndex = -1;
+    renderer->frameDirectLastLoadFrame = -1;
+    renderer->frameDirectLastLoadVRAMBytes = 0;
+    renderer->frameDirectLastLoadUsedCachedBlob = false;
     renderer->frameTextureSwitches = 0;
     renderer->frameTextGlyphDraws = 0;
     renderer->frameTextTenthsMs = 0;
@@ -1920,6 +1930,57 @@ static bool N3DSRenderer_ensureDirectTextureBlobLoaded(N3DSRenderer* renderer, N
     return true;
 }
 
+enum {
+    N3DS_DIRECT_LOAD_KIND_NONE = 0u,
+    N3DS_DIRECT_LOAD_KIND_SPRITE_SHEET = 1u,
+    N3DS_DIRECT_LOAD_KIND_SPRITE_FRAME = 2u,
+    N3DS_DIRECT_LOAD_KIND_BACKGROUND = 3u,
+    N3DS_DIRECT_LOAD_KIND_FONT = 4u,
+};
+
+static void N3DSRenderer_classifyDirectTextureAsset(
+    N3DSRenderer* renderer,
+    const N3DSDirectTextureAsset* target,
+    uint32_t* outKind,
+    int32_t* outIndex,
+    int32_t* outFrame
+) {
+    if (outKind != NULL) *outKind = N3DS_DIRECT_LOAD_KIND_NONE;
+    if (outIndex != NULL) *outIndex = -1;
+    if (outFrame != NULL) *outFrame = -1;
+    if (renderer == NULL || target == NULL) return;
+
+    repeat(renderer->directSpriteAssetCount, spriteIndex) {
+        N3DSDirectSpriteAsset* spriteAsset = &renderer->directSpriteAssets[spriteIndex];
+        if (&spriteAsset->sheetAsset == target) {
+            if (outKind != NULL) *outKind = N3DS_DIRECT_LOAD_KIND_SPRITE_SHEET;
+            if (outIndex != NULL) *outIndex = (int32_t) spriteIndex;
+            return;
+        }
+        repeat(spriteAsset->frameCount, frameIndex) {
+            if (&spriteAsset->frameAssets[frameIndex] != target) continue;
+            if (outKind != NULL) *outKind = N3DS_DIRECT_LOAD_KIND_SPRITE_FRAME;
+            if (outIndex != NULL) *outIndex = (int32_t) spriteIndex;
+            if (outFrame != NULL) *outFrame = (int32_t) frameIndex;
+            return;
+        }
+    }
+
+    repeat(renderer->directBackgroundAssetCount, backgroundIndex) {
+        if (&renderer->directBackgroundAssets[backgroundIndex] != target) continue;
+        if (outKind != NULL) *outKind = N3DS_DIRECT_LOAD_KIND_BACKGROUND;
+        if (outIndex != NULL) *outIndex = (int32_t) backgroundIndex;
+        return;
+    }
+
+    repeat(renderer->directFontAssetCount, fontIndex) {
+        if (&renderer->directFontAssets[fontIndex] != target) continue;
+        if (outKind != NULL) *outKind = N3DS_DIRECT_LOAD_KIND_FONT;
+        if (outIndex != NULL) *outIndex = (int32_t) fontIndex;
+        return;
+    }
+}
+
 static bool N3DSRenderer_loadDirectTextureAsset(N3DSRenderer* renderer, N3DSDirectTextureAsset* asset, const char* relativePath) {
     if (renderer == NULL || asset == NULL || relativePath == NULL) return false;
     if (asset->ready) {
@@ -1930,6 +1991,7 @@ static bool N3DSRenderer_loadDirectTextureAsset(N3DSRenderer* renderer, N3DSDire
     }
     if (asset->failed) return false;
 
+    bool usedCachedBlob = asset->blobData != NULL && asset->blobSize > 0;
     if (!N3DSRenderer_ensureDirectTextureBlobLoaded(renderer, asset, relativePath)) {
         asset->failed = true;
         return false;
@@ -1965,6 +2027,15 @@ static bool N3DSRenderer_loadDirectTextureAsset(N3DSRenderer* renderer, N3DSDire
     asset->lastUsedFrame = renderer->frameSequence;
     renderer->residentDirectAssetVRAMBytes += vramBytes;
     renderer->frameDirectAssetLoads++;
+    N3DSRenderer_classifyDirectTextureAsset(
+        renderer,
+        asset,
+        &renderer->frameDirectLastLoadKind,
+        &renderer->frameDirectLastLoadIndex,
+        &renderer->frameDirectLastLoadFrame
+    );
+    renderer->frameDirectLastLoadVRAMBytes = vramBytes;
+    renderer->frameDirectLastLoadUsedCachedBlob = usedCachedBlob;
     return true;
 }
 
@@ -5752,6 +5823,45 @@ uint32_t N3DSRenderer_getFrameDirectSpriteHits(Renderer* base) {
 uint32_t N3DSRenderer_getFrameDirectAssetLoads(Renderer* base) {
     if (base == NULL) return 0;
     return ((N3DSRenderer*) base)->frameDirectAssetLoads;
+}
+
+uint32_t N3DSRenderer_getFrameDirectLastLoadKind(Renderer* base) {
+    if (base == NULL) return 0;
+    return ((N3DSRenderer*) base)->frameDirectLastLoadKind;
+}
+
+int32_t N3DSRenderer_getFrameDirectLastLoadIndex(Renderer* base) {
+    if (base == NULL) return -1;
+    return ((N3DSRenderer*) base)->frameDirectLastLoadIndex;
+}
+
+int32_t N3DSRenderer_getFrameDirectLastLoadFrame(Renderer* base) {
+    if (base == NULL) return -1;
+    return ((N3DSRenderer*) base)->frameDirectLastLoadFrame;
+}
+
+uint32_t N3DSRenderer_getFrameDirectLastLoadVRAMBytes(Renderer* base) {
+    if (base == NULL) return 0;
+    return ((N3DSRenderer*) base)->frameDirectLastLoadVRAMBytes;
+}
+
+bool N3DSRenderer_getFrameDirectLastLoadUsedCachedBlob(Renderer* base) {
+    if (base == NULL) return false;
+    return ((N3DSRenderer*) base)->frameDirectLastLoadUsedCachedBlob;
+}
+
+const char* N3DSRenderer_getAtlasPageFormatName(Renderer* base, uint32_t pageIndex) {
+    if (base == NULL) return "unknown";
+    N3DSRenderer* renderer = (N3DSRenderer*) base;
+    if (pageIndex >= renderer->atlasPageCount) return "unknown";
+    return N3DSRenderer_getTextureFormatName(renderer->atlasPages[pageIndex].textureFormat);
+}
+
+uint32_t N3DSRenderer_getAtlasPageVRAMBytes(Renderer* base, uint32_t pageIndex) {
+    if (base == NULL) return 0;
+    N3DSRenderer* renderer = (N3DSRenderer*) base;
+    if (pageIndex >= renderer->atlasPageCount) return 0;
+    return N3DSRenderer_getPageVRAMBytes(renderer, &renderer->atlasPages[pageIndex]);
 }
 
 uint32_t N3DSRenderer_getFrameTextureSwitches(Renderer* base) {
