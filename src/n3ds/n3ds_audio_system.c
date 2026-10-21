@@ -213,6 +213,7 @@ struct N3DSAudioSystem {
     uint32_t backgroundPrewarmByteBudget;
     uint32_t pendingPrewarmSoundCount;
     uint32_t pendingPrewarmByteBudget;
+    N3DSAudioRoomPrewarmPerf lastRoomPrewarmPerf;
     bool isNew3DS;
     int32_t lastResolveFailureSound;
     bool ndspChannelInUse[N3DS_MAX_NDSP_CHANNELS];
@@ -3334,7 +3335,16 @@ static void N3DSAudio_prewarmRoom(AudioSystem* base, MAYBE_UNUSED Runner* runner
 #if !N3DS_EAGER_SFX_PRELOAD
     N3DSAudioSystem* audio = (N3DSAudioSystem*) base;
     LightLock_Lock(&audio->lock);
+    N3DSAudioRoomPrewarmPerf perf;
+    memset(&perf, 0, sizeof(perf));
+    perf.valid = true;
+    perf.workerEnabled = audio->workerEnabled;
+    perf.cachedBytesBefore = audio->cachedSoundBytes;
     N3DSAudio_requestCachePrewarmLocked(audio, audio->roomPrewarmSoundCount, audio->roomPrewarmByteBudget);
+    perf.cachedBytesAfter = audio->cachedSoundBytes;
+    perf.pendingSoundCountAfter = audio->pendingPrewarmSoundCount;
+    perf.pendingByteBudgetAfter = audio->pendingPrewarmByteBudget;
+    audio->lastRoomPrewarmPerf = perf;
     LightLock_Unlock(&audio->lock);
 #else
     (void) base;
@@ -3893,6 +3903,18 @@ N3DSAudioSystem* N3DSAudioSystem_create(void) {
     audio->masterGain = 1.0f;
     audio->lastResolveFailureSound = INT32_MIN;
     return audio;
+}
+
+bool N3DSAudioSystem_getLastRoomPrewarmPerf(AudioSystem* base, N3DSAudioRoomPrewarmPerf* outPerf) {
+    if (outPerf == NULL) return false;
+    memset(outPerf, 0, sizeof(*outPerf));
+    if (base == NULL) return false;
+
+    N3DSAudioSystem* audio = (N3DSAudioSystem*) base;
+    LightLock_Lock(&audio->lock);
+    *outPerf = audio->lastRoomPrewarmPerf;
+    LightLock_Unlock(&audio->lock);
+    return outPerf->valid;
 }
 
 void N3DSAudioSystem_getCacheStats(

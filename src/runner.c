@@ -2801,11 +2801,17 @@ static void initRoom(Runner* runner, int32_t roomIndex) {
         if (runner->renderer != nullptr && runner->renderer->vtable->prewarmRoom != nullptr) {
             runner->renderer->vtable->prewarmRoom(runner->renderer, runner);
         }
+#ifdef __3DS__
+        runner->frameRendererPrewarmMs = Runner_nowMs() - phaseStartMs;
+#endif
         Runner_logTiming("renderer prewarm (restore)", phaseStartMs, roomStartMs);
         phaseStartMs = Runner_nowMs();
         if (runner->audioSystem != nullptr && runner->audioSystem->vtable->prewarmRoom != nullptr) {
             runner->audioSystem->vtable->prewarmRoom(runner->audioSystem, runner);
         }
+#ifdef __3DS__
+        runner->frameAudioPrewarmMs = Runner_nowMs() - phaseStartMs;
+#endif
         Runner_logTiming("audio prewarm (restore)", phaseStartMs, roomStartMs);
         Runner_logTiming("initRoom persistent total", roomStartMs, roomStartMs);
         return;
@@ -2984,11 +2990,17 @@ static void initRoom(Runner* runner, int32_t roomIndex) {
     if (runner->renderer != nullptr && runner->renderer->vtable->prewarmRoom != nullptr) {
         runner->renderer->vtable->prewarmRoom(runner->renderer, runner);
     }
+#ifdef __3DS__
+    runner->frameRendererPrewarmMs = Runner_nowMs() - phaseStartMs;
+#endif
     Runner_logTiming("renderer prewarm", phaseStartMs, roomStartMs);
     phaseStartMs = Runner_nowMs();
     if (runner->audioSystem != nullptr && runner->audioSystem->vtable->prewarmRoom != nullptr) {
         runner->audioSystem->vtable->prewarmRoom(runner->audioSystem, runner);
     }
+#ifdef __3DS__
+    runner->frameAudioPrewarmMs = Runner_nowMs() - phaseStartMs;
+#endif
     Runner_logTiming("audio prewarm", phaseStartMs, roomStartMs);
     Runner_logTiming("initRoom total", roomStartMs, roomStartMs);
 }
@@ -3949,6 +3961,16 @@ void Runner_step(Runner* runner) {
     runner->frameStepTopObjectMs = 0.0;
     runner->frameStepTopObjectCalls = 0;
     runner->frameStepTopObjectIndex = -1;
+#ifdef __3DS__
+    runner->frameRoomTransitioned = false;
+    runner->frameRoomTransitionFrom = -1;
+    runner->frameRoomTransitionTo = -1;
+    runner->frameRoomTransitionMs = 0.0;
+    runner->frameRoomInitMs = 0.0;
+    runner->frameRoomStartMs = 0.0;
+    runner->frameRendererPrewarmMs = 0.0;
+    runner->frameAudioPrewarmMs = 0.0;
+#endif
     if (runner->frameStepObjectMsByObject != NULL && runner->frameStepObjectCallsByObject != NULL) {
         memset(runner->frameStepObjectMsByObject, 0, (size_t) runner->dataWin->objt.count * sizeof(double));
         memset(runner->frameStepObjectCallsByObject, 0, (size_t) runner->dataWin->objt.count * sizeof(uint32_t));
@@ -4208,6 +4230,9 @@ void Runner_step(Runner* runner) {
         int32_t oldRoomIndex = runner->currentRoomIndex;
         Room* oldRoom = runner->currentRoom;
         const char* oldRoomName = oldRoom->name;
+#ifdef __3DS__
+        double n3dsRoomTransitionStartMs = Runner_nowMs();
+#endif
 
         // Fire Room End for all instances
         Runner_executeEventForAll(runner, EVENT_OTHER, OTHER_ROOM_END);
@@ -4230,10 +4255,26 @@ void Runner_step(Runner* runner) {
         }
 
         // Load new room
+#ifdef __3DS__
+        double n3dsRoomInitStartMs = Runner_nowMs();
+#endif
         initRoom(runner, newRoomIndex);
+#ifdef __3DS__
+        runner->frameRoomInitMs = Runner_nowMs() - n3dsRoomInitStartMs;
+#endif
 
         // Fire Room Start for all instances
+#ifdef __3DS__
+        double n3dsRoomStartStartMs = Runner_nowMs();
+#endif
         Runner_executeEventForAll(runner, EVENT_OTHER, OTHER_ROOM_START);
+#ifdef __3DS__
+        runner->frameRoomStartMs = Runner_nowMs() - n3dsRoomStartStartMs;
+        runner->frameRoomTransitionMs = Runner_nowMs() - n3dsRoomTransitionStartMs;
+        runner->frameRoomTransitionFrom = oldRoomIndex;
+        runner->frameRoomTransitionTo = newRoomIndex;
+        runner->frameRoomTransitioned = true;
+#endif
     }
 
     Runner_cleanupDestroyedInstances(runner);

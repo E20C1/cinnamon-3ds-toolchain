@@ -2,6 +2,34 @@
 
 #include "../renderer.h"
 
+typedef struct {
+    bool valid;
+    bool battleRoom;
+    int32_t roomIndex;
+    double totalMs;
+    double clearPinsMs;
+    double flushDirectMs;
+    double battleDirectMs;
+    double japaneseFontsMs;
+    double roomAtlasMs;
+    double battleCriticalMs;
+    uint32_t battleDirectReads;
+    uint64_t battleDirectReadBytes;
+    uint32_t japaneseFontReads;
+    uint64_t japaneseFontReadBytes;
+    uint32_t roomAtlasReads;
+    uint64_t roomAtlasReadBytes;
+    uint32_t battleCriticalReads;
+    uint64_t battleCriticalReadBytes;
+    uint32_t atlasCacheBytesBefore;
+    uint32_t atlasCacheBytesAfter;
+    uint32_t directCacheBytesBefore;
+    uint32_t directCacheBytesAfter;
+    uint32_t directVRAMBytesBefore;
+    uint32_t directVRAMBytesAfterFlush;
+    uint32_t directVRAMBytesAfter;
+} N3DSRoomPrewarmPerf;
+
 Renderer* N3DSRenderer_create(void);
 bool N3DSRenderer_isReady(Renderer* renderer);
 const char* N3DSRenderer_getStartupError(Renderer* renderer);
@@ -54,4 +82,5 @@ uint32_t N3DSRenderer_getFrameTextTenthsMs(Renderer* renderer);
 uint32_t N3DSRenderer_getFrameC2DFlushes(Renderer* renderer);
 int32_t N3DSRenderer_findTileEntryIndex(Renderer* renderer, int32_t backgroundIndex, int32_t srcX, int32_t srcY, int32_t srcW, int32_t srcH);
 bool N3DSRenderer_drawCachedTileEntry(Renderer* renderer, int32_t tileEntryIndex, float drawX, float drawY, float xscale, float yscale, uint32_t color, float alpha);
+bool N3DSRenderer_getLastRoomPrewarmPerf(Renderer* renderer, N3DSRoomPrewarmPerf* outPerf);
 void N3DSRenderer_drawDustRectFast(Renderer* renderer, float x, float y, float width, float height, uint32_t color, float alpha);

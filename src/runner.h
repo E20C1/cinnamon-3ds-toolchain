@@ -476,6 +476,17 @@ typedef struct Runner {
     double* frameStepObjectMsByObject;
     uint32_t* frameStepObjectCallsByObject;
 #ifdef __3DS__
+    // Room-transition timing is kept in RAM so battle-entry stalls can be
+    // decomposed without writing diagnostics during interactive battle frames.
+    bool frameRoomTransitioned;
+    int32_t frameRoomTransitionFrom;
+    int32_t frameRoomTransitionTo;
+    double frameRoomTransitionMs;
+    double frameRoomInitMs;
+    double frameRoomStartMs;
+    double frameRendererPrewarmMs;
+    double frameAudioPrewarmMs;
+
     // Immutable classification caches keyed by DataWin object/sprite index.
     // They replace repeated hierarchy strcmp/strstr scans in the 3DS battle draw path.
     uint32_t* n3dsObjectTraits;

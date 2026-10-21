@@ -343,6 +343,10 @@ typedef struct N3DSRenderer {
     uint32_t cachedT3xBytes;
     uint32_t cachedDirectT3xByteLimit;
     uint32_t cachedDirectT3xBytes;
+    uint64_t totalAtlasBlobReads;
+    uint64_t totalAtlasBlobReadBytes;
+    uint64_t totalDirectBlobReads;
+    uint64_t totalDirectBlobReadBytes;
     uint32_t tileLayerChunkVRAMBytes;
     uint32_t frameBlobReads;
     uint32_t frameBlobReadEventCount;
@@ -385,6 +389,7 @@ typedef struct N3DSRenderer {
     uint32_t perfWindowSpritePartDrawCalls;
     uint32_t frameSequence;
     const Room* lastPrewarmedRoom;
+    N3DSRoomPrewarmPerf lastRoomPrewarmPerf;
     N3DSCachedTextLayout cachedTextLayout;
     N3DSResolvedAssetPathEntry* resolvedAssetPathCache;
     N3DSPackedDirectAssetMapEntry* packedDirectAssetMap;
@@ -1473,6 +1478,8 @@ static bool N3DSRenderer_tryLoadPackedDirectTextureBlob(N3DSRenderer* renderer, 
     asset->blobLastUsedStamp = ++renderer->directBlobUseCounter;
     renderer->cachedDirectT3xBytes += entry.dataSize;
     renderer->frameDirectBlobReads++;
+    renderer->totalDirectBlobReads++;
+    renderer->totalDirectBlobReadBytes += (uint64_t) asset->blobSize;
     return true;
 }
 
@@ -1616,6 +1623,8 @@ static bool N3DSRenderer_ensurePageBlobLoaded(N3DSRenderer* renderer, uint32_t p
     renderer->cachedT3xBytes += size;
     page->blobLastUsedStamp = ++renderer->blobUseCounter;
     renderer->frameBlobReads++;
+    renderer->totalAtlasBlobReads++;
+    renderer->totalAtlasBlobReadBytes += (uint64_t) size;
     if (renderer->frameBlobReadEventCount < N3DS_FRAME_PAGE_IMPORT_EVENT_CAP) {
         uint32_t eventIndex = renderer->frameBlobReadEventCount++;
         renderer->frameBlobReadEventPages[eventIndex] =
@@ -1958,6 +1967,8 @@ static bool N3DSRenderer_ensureDirectTextureBlobLoaded(N3DSRenderer* renderer, N
     asset->blobLastUsedStamp = ++renderer->directBlobUseCounter;
     renderer->cachedDirectT3xBytes += size;
     renderer->frameDirectBlobReads++;
+    renderer->totalDirectBlobReads++;
+    renderer->totalDirectBlobReadBytes += (uint64_t) asset->blobSize;
     return true;
 }
 
@@ -3836,27 +3847,77 @@ static void N3DSRenderer_prewarmRoom(Renderer* base, Runner* runner) {
     N3DSRenderer* renderer = (N3DSRenderer*) base;
     Room* room = runner->currentRoom;
     bool roomChanged = renderer->lastPrewarmedRoom != room;
+    bool battleRoom = N3DSRenderer_isUndertaleBattleRoom(renderer, runner);
+    N3DSRoomPrewarmPerf perf;
+    memset(&perf, 0, sizeof(perf));
+    perf.valid = true;
+    perf.battleRoom = battleRoom;
+    perf.roomIndex = runner->currentRoomIndex;
+    perf.atlasCacheBytesBefore = renderer->cachedT3xBytes;
+    perf.directCacheBytesBefore = renderer->cachedDirectT3xBytes;
+    perf.directVRAMBytesBefore = renderer->residentDirectAssetVRAMBytes;
+    u64 totalStartTick = svcGetSystemTick();
 
+    u64 phaseStartTick = svcGetSystemTick();
     N3DSRenderer_clearDirectAssetPins(renderer);
+    perf.clearPinsMs = N3DSRenderer_ticksToMs(svcGetSystemTick() - phaseStartTick);
+
+    phaseStartTick = svcGetSystemTick();
     if (roomChanged) {
         N3DSRenderer_flushRoomDirectAssets(renderer);
     }
+    perf.flushDirectMs = N3DSRenderer_ticksToMs(svcGetSystemTick() - phaseStartTick);
+    perf.directVRAMBytesAfterFlush = renderer->residentDirectAssetVRAMBytes;
     if (roomChanged && !renderer->isNew3DS) {
         renderer->pendingOld3DSAtlasFlush = true;
     }
     renderer->lastPrewarmedRoom = room;
 
-    // Battle-only direct blob warming avoids moving this I/O onto unrelated
-    // room transitions. Texture creation remains lazy, so GPU residency does
-    // not increase here.
-    if (N3DSRenderer_isUndertaleBattleRoom(renderer, runner)) {
+    // Lifetime counters keep synchronous room-entry reads visible even though
+    // beginFrame resets the ordinary per-frame counters after Runner_step.
+    uint64_t readsBefore = renderer->totalDirectBlobReads;
+    uint64_t bytesBefore = renderer->totalDirectBlobReadBytes;
+    phaseStartTick = svcGetSystemTick();
+    if (battleRoom) {
         N3DSRenderer_prewarmBattleDirectSpriteBlobs(renderer);
+    }
+    perf.battleDirectMs = N3DSRenderer_ticksToMs(svcGetSystemTick() - phaseStartTick);
+    perf.battleDirectReads = (uint32_t) (renderer->totalDirectBlobReads - readsBefore);
+    perf.battleDirectReadBytes = renderer->totalDirectBlobReadBytes - bytesBefore;
+
+    readsBefore = renderer->totalDirectBlobReads;
+    bytesBefore = renderer->totalDirectBlobReadBytes;
+    phaseStartTick = svcGetSystemTick();
+    if (battleRoom) {
         N3DSRenderer_prewarmJapaneseDirectFontBlobs(renderer);
     }
+    perf.japaneseFontsMs = N3DSRenderer_ticksToMs(svcGetSystemTick() - phaseStartTick);
+    perf.japaneseFontReads = (uint32_t) (renderer->totalDirectBlobReads - readsBefore);
+    perf.japaneseFontReadBytes = renderer->totalDirectBlobReadBytes - bytesBefore;
+
+    readsBefore = renderer->totalAtlasBlobReads;
+    bytesBefore = renderer->totalAtlasBlobReadBytes;
+    phaseStartTick = svcGetSystemTick();
     N3DSRenderer_prewarmRoomBlobCache(renderer, runner);
-    if (N3DSRenderer_isUndertaleBattleRoom(renderer, runner)) {
+    perf.roomAtlasMs = N3DSRenderer_ticksToMs(svcGetSystemTick() - phaseStartTick);
+    perf.roomAtlasReads = (uint32_t) (renderer->totalAtlasBlobReads - readsBefore);
+    perf.roomAtlasReadBytes = renderer->totalAtlasBlobReadBytes - bytesBefore;
+
+    readsBefore = renderer->totalAtlasBlobReads;
+    bytesBefore = renderer->totalAtlasBlobReadBytes;
+    phaseStartTick = svcGetSystemTick();
+    if (battleRoom) {
         N3DSRenderer_prewarmBattleCriticalAtlasBlobs(renderer, runner);
     }
+    perf.battleCriticalMs = N3DSRenderer_ticksToMs(svcGetSystemTick() - phaseStartTick);
+    perf.battleCriticalReads = (uint32_t) (renderer->totalAtlasBlobReads - readsBefore);
+    perf.battleCriticalReadBytes = renderer->totalAtlasBlobReadBytes - bytesBefore;
+
+    perf.atlasCacheBytesAfter = renderer->cachedT3xBytes;
+    perf.directCacheBytesAfter = renderer->cachedDirectT3xBytes;
+    perf.directVRAMBytesAfter = renderer->residentDirectAssetVRAMBytes;
+    perf.totalMs = N3DSRenderer_ticksToMs(svcGetSystemTick() - totalStartTick);
+    renderer->lastRoomPrewarmPerf = perf;
 }
 
 static void N3DSRenderer_computeFrameLayout(N3DSRenderer* renderer, int32_t gameW, int32_t gameH) {
@@ -6061,6 +6122,14 @@ uint32_t N3DSRenderer_getResidentDirectAssetVRAMLimitBytes(Renderer* base) {
 uint32_t N3DSRenderer_getFrameBlobReads(Renderer* base) {
     if (base == NULL) return 0;
     return ((N3DSRenderer*) base)->frameBlobReads;
+}
+
+bool N3DSRenderer_getLastRoomPrewarmPerf(Renderer* base, N3DSRoomPrewarmPerf* outPerf) {
+    if (outPerf == NULL) return false;
+    memset(outPerf, 0, sizeof(*outPerf));
+    if (base == NULL) return false;
+    *outPerf = ((N3DSRenderer*) base)->lastRoomPrewarmPerf;
+    return outPerf->valid;
 }
 
 uint32_t N3DSRenderer_getFrameBlobReadEventCount(Renderer* base) {

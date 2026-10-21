@@ -28,6 +28,7 @@
 #define N3DS_DUST_PERF_MAX_FRAMES 256u
 #define N3DS_PERF_IMPORT_PAGE_CAP 16u
 #define N3DS_PERF_PENDING_EVENT_CAP 8u
+#define N3DS_BATTLE_ENTRY_CAPTURE_FRAMES 4u
 #define N3DS_DUST_PERF_LOG_PATH "sdmc:/3ds/cinnamon/dust_perf.log"
 
 void N3DS_tryTriggerAsrielLed(Runner* runner);
@@ -139,6 +140,42 @@ typedef struct {
     int32_t topStepObjectIndex;
     double topStepObjectMs;
     uint32_t topStepObjectCalls;
+    int32_t roomTransitioned;
+    int32_t roomFromIndex;
+    int32_t roomToIndex;
+    double roomTransitionMs;
+    double roomInitMs;
+    double roomStartMs;
+    double rendererPrewarmMs;
+    double audioPrewarmMs;
+    int32_t prewarmBattleRoom;
+    double prewarmTotalMs;
+    double prewarmClearPinsMs;
+    double prewarmFlushDirectMs;
+    double prewarmBattleDirectMs;
+    uint32_t prewarmBattleDirectReads;
+    uint64_t prewarmBattleDirectReadBytes;
+    double prewarmJapaneseFontsMs;
+    uint32_t prewarmJapaneseFontReads;
+    uint64_t prewarmJapaneseFontReadBytes;
+    double prewarmRoomAtlasMs;
+    uint32_t prewarmRoomAtlasReads;
+    uint64_t prewarmRoomAtlasReadBytes;
+    double prewarmBattleCriticalMs;
+    uint32_t prewarmBattleCriticalReads;
+    uint64_t prewarmBattleCriticalReadBytes;
+    uint32_t prewarmAtlasCacheBytesBefore;
+    uint32_t prewarmAtlasCacheBytesAfter;
+    uint32_t prewarmDirectCacheBytesBefore;
+    uint32_t prewarmDirectCacheBytesAfter;
+    uint32_t prewarmDirectVRAMBytesBefore;
+    uint32_t prewarmDirectVRAMBytesAfterFlush;
+    uint32_t prewarmDirectVRAMBytesAfter;
+    int32_t audioPrewarmWorkerEnabled;
+    uint32_t audioPrewarmCacheBytesBefore;
+    uint32_t audioPrewarmCacheBytesAfter;
+    uint32_t audioPrewarmPendingSounds;
+    uint32_t audioPrewarmPendingBytes;
 } N3DSDustPerfFrame;
 
 typedef struct {
@@ -168,6 +205,7 @@ typedef struct {
 
 static N3DSDustPerfSampler gN3DSDustPerfSampler;
 static N3DSDustPerfSampler gN3DSAttackPerfSampler;
+static N3DSDustPerfSampler gN3DSBattleEntryPerfSampler;
 
 typedef struct {
     N3DSDustPerfSampler sampler;
@@ -861,6 +899,8 @@ static N3DSDustPerfFrame N3DSDustPerf_captureFrame(Runner* runner, Renderer* ren
     sample.targetChoiceTPAGIndex = -1;
     sample.myFight = -1;
     sample.mnFight = -1;
+    sample.roomFromIndex = -1;
+    sample.roomToIndex = -1;
     sample.dustCount = Runner_get3DSObjectInstanceCountByName(runner, "obj_whtpxlgrav");
     if (runner != NULL) {
         sample.instancesCreated = runner->frameInstancesCreated;
@@ -890,6 +930,54 @@ static N3DSDustPerfFrame N3DSDustPerf_captureFrame(Runner* runner, Renderer* ren
         sample.topStepObjectIndex = runner->frameStepTopObjectIndex;
         sample.topStepObjectMs = runner->frameStepTopObjectMs;
         sample.topStepObjectCalls = runner->frameStepTopObjectCalls;
+
+        if (runner->frameRoomTransitioned) {
+            sample.roomTransitioned = 1;
+            sample.roomFromIndex = runner->frameRoomTransitionFrom;
+            sample.roomToIndex = runner->frameRoomTransitionTo;
+            sample.roomTransitionMs = runner->frameRoomTransitionMs;
+            sample.roomInitMs = runner->frameRoomInitMs;
+            sample.roomStartMs = runner->frameRoomStartMs;
+            sample.rendererPrewarmMs = runner->frameRendererPrewarmMs;
+            sample.audioPrewarmMs = runner->frameAudioPrewarmMs;
+
+            N3DSRoomPrewarmPerf prewarmPerf;
+            if (N3DSRenderer_getLastRoomPrewarmPerf(renderer, &prewarmPerf) &&
+                prewarmPerf.roomIndex == runner->frameRoomTransitionTo) {
+                sample.prewarmBattleRoom = prewarmPerf.battleRoom ? 1 : 0;
+                sample.prewarmTotalMs = prewarmPerf.totalMs;
+                sample.prewarmClearPinsMs = prewarmPerf.clearPinsMs;
+                sample.prewarmFlushDirectMs = prewarmPerf.flushDirectMs;
+                sample.prewarmBattleDirectMs = prewarmPerf.battleDirectMs;
+                sample.prewarmBattleDirectReads = prewarmPerf.battleDirectReads;
+                sample.prewarmBattleDirectReadBytes = prewarmPerf.battleDirectReadBytes;
+                sample.prewarmJapaneseFontsMs = prewarmPerf.japaneseFontsMs;
+                sample.prewarmJapaneseFontReads = prewarmPerf.japaneseFontReads;
+                sample.prewarmJapaneseFontReadBytes = prewarmPerf.japaneseFontReadBytes;
+                sample.prewarmRoomAtlasMs = prewarmPerf.roomAtlasMs;
+                sample.prewarmRoomAtlasReads = prewarmPerf.roomAtlasReads;
+                sample.prewarmRoomAtlasReadBytes = prewarmPerf.roomAtlasReadBytes;
+                sample.prewarmBattleCriticalMs = prewarmPerf.battleCriticalMs;
+                sample.prewarmBattleCriticalReads = prewarmPerf.battleCriticalReads;
+                sample.prewarmBattleCriticalReadBytes = prewarmPerf.battleCriticalReadBytes;
+                sample.prewarmAtlasCacheBytesBefore = prewarmPerf.atlasCacheBytesBefore;
+                sample.prewarmAtlasCacheBytesAfter = prewarmPerf.atlasCacheBytesAfter;
+                sample.prewarmDirectCacheBytesBefore = prewarmPerf.directCacheBytesBefore;
+                sample.prewarmDirectCacheBytesAfter = prewarmPerf.directCacheBytesAfter;
+                sample.prewarmDirectVRAMBytesBefore = prewarmPerf.directVRAMBytesBefore;
+                sample.prewarmDirectVRAMBytesAfterFlush = prewarmPerf.directVRAMBytesAfterFlush;
+                sample.prewarmDirectVRAMBytesAfter = prewarmPerf.directVRAMBytesAfter;
+            }
+
+            N3DSAudioRoomPrewarmPerf audioPrewarmPerf;
+            if (N3DSAudioSystem_getLastRoomPrewarmPerf(runner->audioSystem, &audioPrewarmPerf)) {
+                sample.audioPrewarmWorkerEnabled = audioPrewarmPerf.workerEnabled ? 1 : 0;
+                sample.audioPrewarmCacheBytesBefore = audioPrewarmPerf.cachedBytesBefore;
+                sample.audioPrewarmCacheBytesAfter = audioPrewarmPerf.cachedBytesAfter;
+                sample.audioPrewarmPendingSounds = audioPrewarmPerf.pendingSoundCountAfter;
+                sample.audioPrewarmPendingBytes = audioPrewarmPerf.pendingByteBudgetAfter;
+            }
+        }
 
         sample.atlasImportObjectIndex = runner->frameDrawTopImportObjectIndex;
         sample.atlasImportInstanceId = runner->frameDrawTopImportInstanceId;
@@ -1058,7 +1146,16 @@ static void N3DSPerf_writeEventToFile(
         "atlas_trigger_tpag,atlas_trigger_sprite,atlas_trigger_sprite_name,atlas_trigger_frame,"
         "atlas_imports,atlas_evictions,atlas_pass,atlas_pages,atlas_page_info,target_object,target_name,target_instance,target_sprite,"
         "target_subimg,target_tpag,target_image_index,target_image_speed,battle_active,myfight,mnfight,"
-        "top_step_object,top_step_name,top_step_ms,top_step_calls\n", file);
+        "top_step_object,top_step_name,top_step_ms,top_step_calls,"
+        "room_transitioned,room_from,room_to,room_transition_ms,room_init_ms,room_start_ms,renderer_prewarm_ms,audio_prewarm_ms,"
+        "prewarm_battle_room,prewarm_total_ms,prewarm_clear_pins_ms,prewarm_flush_direct_ms,"
+        "prewarm_battle_direct_ms,prewarm_battle_direct_reads,prewarm_battle_direct_bytes,"
+        "prewarm_japanese_fonts_ms,prewarm_japanese_font_reads,prewarm_japanese_font_bytes,"
+        "prewarm_room_atlas_ms,prewarm_room_atlas_reads,prewarm_room_atlas_bytes,"
+        "prewarm_battle_critical_ms,prewarm_battle_critical_reads,prewarm_battle_critical_bytes,"
+        "prewarm_atlas_cache_before,prewarm_atlas_cache_after,prewarm_direct_cache_before,prewarm_direct_cache_after,"
+        "prewarm_direct_vram_before,prewarm_direct_vram_after_flush,prewarm_direct_vram_after,"
+        "audio_prewarm_worker,audio_cache_before,audio_cache_after,audio_pending_sounds,audio_pending_bytes\n", file);
 
     repeat(sampler->sampleCount, i) {
         const N3DSDustPerfFrame* sample = &sampler->samples[i];
@@ -1214,9 +1311,49 @@ static void N3DSPerf_writeEventToFile(
             (long) sample->targetChoiceTPAGIndex, (double) sample->targetChoiceImageIndex,
             (double) sample->targetChoiceImageSpeed, (long) sample->battleActive,
             (long) sample->myFight, (long) sample->mnFight);
-        fprintf(file, ",%ld,%s,%.3f,%lu\n",
+        fprintf(file, ",%ld,%s,%.3f,%lu",
             (long) sample->topStepObjectIndex, topName,
             sample->topStepObjectMs, (unsigned long) sample->topStepObjectCalls);
+        fprintf(file,
+            ",%ld,%ld,%ld,%.3f,%.3f,%.3f,%.3f,%.3f,%ld,%.3f,%.3f,%.3f,"
+            "%.3f,%lu,%llu,%.3f,%lu,%llu,%.3f,%lu,%llu,%.3f,%lu,%llu,"
+            "%lu,%lu,%lu,%lu,%lu,%lu,%lu,%ld,%lu,%lu,%lu,%lu\n",
+            (long) sample->roomTransitioned,
+            (long) sample->roomFromIndex,
+            (long) sample->roomToIndex,
+            sample->roomTransitionMs,
+            sample->roomInitMs,
+            sample->roomStartMs,
+            sample->rendererPrewarmMs,
+            sample->audioPrewarmMs,
+            (long) sample->prewarmBattleRoom,
+            sample->prewarmTotalMs,
+            sample->prewarmClearPinsMs,
+            sample->prewarmFlushDirectMs,
+            sample->prewarmBattleDirectMs,
+            (unsigned long) sample->prewarmBattleDirectReads,
+            (unsigned long long) sample->prewarmBattleDirectReadBytes,
+            sample->prewarmJapaneseFontsMs,
+            (unsigned long) sample->prewarmJapaneseFontReads,
+            (unsigned long long) sample->prewarmJapaneseFontReadBytes,
+            sample->prewarmRoomAtlasMs,
+            (unsigned long) sample->prewarmRoomAtlasReads,
+            (unsigned long long) sample->prewarmRoomAtlasReadBytes,
+            sample->prewarmBattleCriticalMs,
+            (unsigned long) sample->prewarmBattleCriticalReads,
+            (unsigned long long) sample->prewarmBattleCriticalReadBytes,
+            (unsigned long) sample->prewarmAtlasCacheBytesBefore,
+            (unsigned long) sample->prewarmAtlasCacheBytesAfter,
+            (unsigned long) sample->prewarmDirectCacheBytesBefore,
+            (unsigned long) sample->prewarmDirectCacheBytesAfter,
+            (unsigned long) sample->prewarmDirectVRAMBytesBefore,
+            (unsigned long) sample->prewarmDirectVRAMBytesAfterFlush,
+            (unsigned long) sample->prewarmDirectVRAMBytesAfter,
+            (long) sample->audioPrewarmWorkerEnabled,
+            (unsigned long) sample->audioPrewarmCacheBytesBefore,
+            (unsigned long) sample->audioPrewarmCacheBytesAfter,
+            (unsigned long) sample->audioPrewarmPendingSounds,
+            (unsigned long) sample->audioPrewarmPendingBytes);
     }
     fprintf(file, "# end %s-event\n", eventName != NULL ? eventName : "perf");
 }
@@ -1336,6 +1473,55 @@ static void N3DSAttackPerf_flushPending(N3DSDustPerfSampler* sampler) {
     N3DSPerf_queueEvent(sampler, "attack", "attack");
     sampler->active = false;
     sampler->sampleCount = 0;
+}
+
+static void N3DSBattleEntryPerf_reset(N3DSDustPerfSampler* sampler) {
+    if (sampler == NULL) return;
+    sampler->active = false;
+    sampler->truncated = false;
+    sampler->postFramesRemaining = 0;
+    sampler->sampleCount = 0;
+    sampler->preCount = 0;
+    sampler->preWrite = 0;
+}
+
+static void N3DSBattleEntryPerf_update(
+    N3DSDustPerfSampler* sampler,
+    Runner* runner,
+    const N3DSDustPerfFrame* captured
+) {
+    if (sampler == NULL || runner == NULL || captured == NULL) return;
+    N3DSDustPerfFrame sample = *captured;
+    bool enteredBattle = runner->frameRoomTransitioned && sample.battleActive != 0;
+
+    if (!sampler->active) {
+        if (!enteredBattle) return;
+        sampler->active = true;
+        sampler->truncated = false;
+        sampler->sampleCount = 0;
+        sampler->postFramesRemaining = N3DS_BATTLE_ENTRY_CAPTURE_FRAMES - 1u;
+        sampler->eventId++;
+        sample.phase = 1;
+        N3DSDustPerf_appendSample(sampler, &sample);
+        if (sampler->postFramesRemaining > 0) return;
+        N3DSPerf_queueEvent(sampler, "battle_entry", "entry");
+        N3DSBattleEntryPerf_reset(sampler);
+        return;
+    }
+
+    sample.phase = 0;
+    N3DSDustPerf_appendSample(sampler, &sample);
+    if (sampler->postFramesRemaining > 0) sampler->postFramesRemaining--;
+    if (sampler->postFramesRemaining > 0) return;
+
+    N3DSPerf_queueEvent(sampler, "battle_entry", "entry");
+    N3DSBattleEntryPerf_reset(sampler);
+}
+
+static void N3DSBattleEntryPerf_flushPending(N3DSDustPerfSampler* sampler) {
+    if (sampler == NULL || !sampler->active || sampler->sampleCount == 0) return;
+    N3DSPerf_queueEvent(sampler, "battle_entry", "entry");
+    N3DSBattleEntryPerf_reset(sampler);
 }
 
 static void N3DSDebugMonitor_init(N3DSDebugMonitor* monitor) {
@@ -2352,7 +2538,11 @@ int main(int argc, char** argv) {
         N3DSDustPerfFrame perfSample = N3DSDustPerf_captureFrame(runner, renderer, frameStepMs, &renderPerf);
         N3DSDustPerf_update(&gN3DSDustPerfSampler, runner, &perfSample);
         N3DSAttackPerf_update(&gN3DSAttackPerfSampler, runner, &perfSample);
-        if (perfSample.battleActive == 0 && !gN3DSDustPerfSampler.active && !gN3DSAttackPerfSampler.active) {
+        N3DSBattleEntryPerf_update(&gN3DSBattleEntryPerfSampler, runner, &perfSample);
+        if (perfSample.battleActive == 0 &&
+            !gN3DSDustPerfSampler.active &&
+            !gN3DSAttackPerfSampler.active &&
+            !gN3DSBattleEntryPerfSampler.active) {
             N3DSPerf_flushQueuedEvents(runner);
         }
 
@@ -2362,6 +2552,7 @@ int main(int argc, char** argv) {
 
     N3DSDustPerf_flushPending(&gN3DSDustPerfSampler);
     N3DSAttackPerf_flushPending(&gN3DSAttackPerfSampler);
+    N3DSBattleEntryPerf_flushPending(&gN3DSBattleEntryPerfSampler);
     N3DSPerf_flushQueuedEvents(runner);
 
     audioSystem->vtable->destroy(audioSystem);
