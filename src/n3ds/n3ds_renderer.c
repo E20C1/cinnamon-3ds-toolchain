@@ -3539,6 +3539,131 @@ static bool N3DSRenderer_isUndertaleBattleRoom(N3DSRenderer* renderer, Runner* r
     return false;
 }
 
+static bool N3DSRenderer_objectInheritsNamed(const DataWin* dw, int32_t objectIndex, const char* wantedName) {
+    if (dw == NULL || wantedName == NULL) return false;
+    int32_t depth = 0;
+    while (objectIndex >= 0 && (uint32_t) objectIndex < dw->objt.count && depth < 64) {
+        const GameObject* object = &dw->objt.objects[objectIndex];
+        if (object->name != NULL && strcmp(object->name, wantedName) == 0) return true;
+        objectIndex = object->parentId;
+        depth++;
+    }
+    return false;
+}
+
+static int32_t N3DSRenderer_findSpriteIndexByName(const DataWin* dw, const char* wantedName) {
+    if (dw == NULL || wantedName == NULL) return -1;
+    repeat(dw->sprt.count, spriteIndex) {
+        const Sprite* sprite = &dw->sprt.sprites[spriteIndex];
+        if (sprite->name != NULL && strcmp(sprite->name, wantedName) == 0) return (int32_t) spriteIndex;
+    }
+    return -1;
+}
+
+static void N3DSRenderer_prewarmSpriteAllFramesBlobOnly(
+    N3DSRenderer* renderer,
+    bool* seenPages,
+    int32_t spriteIndex,
+    uint32_t* remainingBlobBytes
+) {
+    if (renderer == NULL || seenPages == NULL || remainingBlobBytes == NULL ||
+        renderer->base.dataWin == NULL || spriteIndex < 0 ||
+        (uint32_t) spriteIndex >= renderer->base.dataWin->sprt.count) {
+        return;
+    }
+
+    Sprite* sprite = &renderer->base.dataWin->sprt.sprites[spriteIndex];
+    repeat(sprite->textureCount, frameIndex) {
+        N3DSRenderer_prewarmTPAGBlobOnly(renderer, seenPages, sprite->tpagIndices[frameIndex], remainingBlobBytes);
+    }
+}
+
+static bool N3DSRenderer_tryGetInstanceIntSelfVar(
+    Runner* runner,
+    Instance* inst,
+    const char* name,
+    int32_t* outValue
+) {
+    if (runner == NULL || runner->vmContext == NULL || inst == NULL || name == NULL || outValue == NULL) return false;
+
+    ptrdiff_t slot = shgeti(runner->vmContext->selfVarNameMap, (char*) name);
+    if (slot < 0) return false;
+    int32_t varID = runner->vmContext->selfVarNameMap[slot].value;
+    RValue value = Instance_getSelfVar(inst, varID);
+
+    double number;
+    switch (value.type) {
+        case RVALUE_INT32: number = (double) value.int32; break;
+#ifndef NO_RVALUE_INT64
+        case RVALUE_INT64: number = (double) value.int64; break;
+#endif
+        case RVALUE_REAL: number = (double) value.real; break;
+        case RVALUE_BOOL: number = value.int32 ? 1.0 : 0.0; break;
+        default: return false;
+    }
+    if (!isfinite(number) || number < (double) INT32_MIN || number > (double) INT32_MAX) return false;
+    *outValue = (int32_t) number;
+    return true;
+}
+
+static void N3DSRenderer_prewarmBattleCriticalAtlasBlobs(N3DSRenderer* renderer, Runner* runner) {
+    if (renderer == NULL || runner == NULL || renderer->base.dataWin == NULL ||
+        renderer->atlasPageCount == 0 || !N3DSRenderer_isUndertaleBattleRoom(renderer, runner)) {
+        return;
+    }
+
+    DataWin* dw = renderer->base.dataWin;
+    bool* seenPages = safeCalloc(renderer->atlasPageCount, sizeof(bool));
+    // Critical battle assets run after the ordinary 8/12 MiB room prewarm. Let
+    // the global 16/24 MiB atlas blob LRU enforce the real cache ceiling so a
+    // future hurt/damage asset can displace a stale room blob when necessary.
+    uint32_t remainingBlobBytes = UINT32_MAX;
+
+    repeat(arrlen(runner->instances), instanceIndex) {
+        Instance* inst = runner->instances[instanceIndex];
+        if (inst == NULL || inst->destroyed || !inst->active) continue;
+        if (!N3DSRenderer_objectInheritsNamed(dw, inst->objectIndex, "obj_monsterparent")) continue;
+
+        // Existing monster bodies/parts may animate onto a different atlas page,
+        // so keep every frame's compressed blob warm rather than only image_index.
+        N3DSRenderer_prewarmSpriteAllFramesBlobOnly(renderer, seenPages, inst->spriteIndex, &remainingBlobBytes);
+
+        // Many UNDERTALE monsters expose their future hurt sprite directly.
+        int32_t hurtSpriteIndex = -1;
+        if (N3DSRenderer_tryGetInstanceIntSelfVar(runner, inst, "hurtgfx", &hurtSpriteIndex)) {
+            N3DSRenderer_prewarmSpriteAllFramesBlobOnly(renderer, seenPages, hurtSpriteIndex, &remainingBlobBytes);
+        }
+
+        // A few early monsters hard-code the hurt sprite instead of storing
+        // hurtgfx. Their naming is still regular (e.g. spr_whimsun -> spr_whimsunhurt).
+        if (inst->spriteIndex >= 0 && (uint32_t) inst->spriteIndex < dw->sprt.count) {
+            const char* spriteName = dw->sprt.sprites[inst->spriteIndex].name;
+            if (spriteName != NULL && strncmp(spriteName, "spr_", 4) == 0) {
+                char hurtName[256];
+                int written = snprintf(hurtName, sizeof(hurtName), "%shurt", spriteName);
+                if (written > 0 && (size_t) written < sizeof(hurtName)) {
+                    int32_t namedHurtSprite = N3DSRenderer_findSpriteIndexByName(dw, hurtName);
+                    N3DSRenderer_prewarmSpriteAllFramesBlobOnly(renderer, seenPages, namedHurtSprite, &remainingBlobBytes);
+                }
+            }
+        }
+    }
+
+    // Shared battle transients are deliberately touched last so they remain MRU
+    // after the room and monster dependency scans. No Froggit-specific assets are
+    // loaded in unrelated battles anymore.
+    static const char* const kSharedBattleSpriteNames[] = {
+        "spr_blconsm",
+        "spr_dmgnum_o",
+    };
+    repeat(sizeof(kSharedBattleSpriteNames) / sizeof(kSharedBattleSpriteNames[0]), nameIndex) {
+        int32_t spriteIndex = N3DSRenderer_findSpriteIndexByName(dw, kSharedBattleSpriteNames[nameIndex]);
+        N3DSRenderer_prewarmSpriteAllFramesBlobOnly(renderer, seenPages, spriteIndex, &remainingBlobBytes);
+    }
+
+    free(seenPages);
+}
+
 static void N3DSRenderer_prewarmRoomBlobCache(N3DSRenderer* renderer, Runner* runner) {
     if (renderer == NULL || runner == NULL || runner->currentRoom == NULL || renderer->atlasPageCount == 0) return;
 
@@ -3547,32 +3672,6 @@ static void N3DSRenderer_prewarmRoomBlobCache(N3DSRenderer* renderer, Runner* ru
     uint32_t remainingBlobBytes = renderer->isNew3DS ? N3DS_PREWARM_BLOB_BYTES_NEW3DS : N3DS_PREWARM_BLOB_BYTES_OLD3DS;
     bool* seenPages = safeCalloc(renderer->atlasPageCount, sizeof(bool));
     uint32_t roomIndex = UINT32_MAX;
-
-    // These sprites are created dynamically by UNDERTALE's battle scripts and
-    // therefore are not guaranteed to appear in a static room manifest. Prewarm
-    // only their compressed atlas blobs: this removes first-use storage I/O
-    // without increasing resident GPU texture pages.
-    if (dw != NULL && N3DSRenderer_isUndertaleBattleRoom(renderer, runner)) {
-        static const char* const kBattleTransientSpriteNames[] = {
-            "spr_dmgnum_o",
-            "spr_blconsm",
-            "spr_froghead",
-            "spr_froglegs",
-        };
-        repeat(sizeof(kBattleTransientSpriteNames) / sizeof(kBattleTransientSpriteNames[0]), nameIndex) {
-            const char* wantedName = kBattleTransientSpriteNames[nameIndex];
-            repeat(dw->sprt.count, spriteIndex) {
-                Sprite* sprite = &dw->sprt.sprites[spriteIndex];
-                if (sprite->name == NULL || strcmp(sprite->name, wantedName) != 0) continue;
-                repeat(sprite->textureCount, frameIndex) {
-                    int32_t tpagIndex = sprite->tpagIndices[frameIndex];
-                    N3DSRenderer_prewarmTPAGBlobOnly(renderer, seenPages, tpagIndex, &remainingBlobBytes);
-                    if (remainingBlobBytes == 0) goto done;
-                }
-                break;
-            }
-        }
-    }
 
     if (dw != NULL && dw->room.rooms != NULL && room >= dw->room.rooms && room < (dw->room.rooms + dw->room.count)) {
         roomIndex = (uint32_t) (room - dw->room.rooms);
@@ -3753,6 +3852,9 @@ static void N3DSRenderer_prewarmRoom(Renderer* base, Runner* runner) {
         N3DSRenderer_prewarmJapaneseDirectFontBlobs(renderer);
     }
     N3DSRenderer_prewarmRoomBlobCache(renderer, runner);
+    if (N3DSRenderer_isUndertaleBattleRoom(renderer, runner)) {
+        N3DSRenderer_prewarmBattleCriticalAtlasBlobs(renderer, runner);
+    }
 }
 
 static void N3DSRenderer_computeFrameLayout(N3DSRenderer* renderer, int32_t gameW, int32_t gameH) {
