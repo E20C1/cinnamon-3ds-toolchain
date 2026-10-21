@@ -1151,7 +1151,7 @@ static void N3DSPerf_writeEvent(
             (unsigned long) sample->residentDirectVRAMBytes,
             (unsigned long) sample->residentDirectVRAMLimitBytes);
         fprintf(file,
-            ",%lu,%s,%lu,%s,%lu,%lu,%lu,%lu,%lu,%lu,%s,%ld,%ld,%lu,%ld,%lu",
+            ",%lu,%s,%lu,%s,%lu,%lu,%lu,%lu,%lu,%s,%ld,%ld,%lu,%ld,%lu",
             (unsigned long) sample->atlasBlobReads,
             atlasBlobReadPages,
             (unsigned long) sample->atlasBlobCacheBytes,
