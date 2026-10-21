@@ -215,6 +215,7 @@ typedef struct {
 
 static N3DSPerfPendingEvent gN3DSPerfPendingEvents[N3DS_PERF_PENDING_EVENT_CAP];
 static uint32_t gN3DSPerfPendingEventCount;
+static bool gN3DSPerfBattleRoomActive;
 
 typedef struct {
     bool touchEnabled;
@@ -1492,7 +1493,8 @@ static void N3DSBattleEntryPerf_update(
 ) {
     if (sampler == NULL || runner == NULL || captured == NULL) return;
     N3DSDustPerfFrame sample = *captured;
-    bool enteredBattle = runner->frameRoomTransitioned && sample.battleActive != 0;
+    bool enteredBattle = runner->frameRoomTransitioned &&
+        (sample.prewarmBattleRoom != 0 || sample.battleActive != 0);
 
     if (!sampler->active) {
         if (!enteredBattle) return;
@@ -2536,10 +2538,16 @@ int main(int argc, char** argv) {
 
         N3DSDebugMonitor_tickFrame(&debugMonitor, renderPerf.totalMs);
         N3DSDustPerfFrame perfSample = N3DSDustPerf_captureFrame(runner, renderer, frameStepMs, &renderPerf);
+        if (perfSample.roomTransitioned != 0) {
+            gN3DSPerfBattleRoomActive = perfSample.prewarmBattleRoom != 0;
+        } else if (perfSample.battleActive != 0) {
+            gN3DSPerfBattleRoomActive = true;
+        }
         N3DSDustPerf_update(&gN3DSDustPerfSampler, runner, &perfSample);
         N3DSAttackPerf_update(&gN3DSAttackPerfSampler, runner, &perfSample);
         N3DSBattleEntryPerf_update(&gN3DSBattleEntryPerfSampler, runner, &perfSample);
-        if (perfSample.battleActive == 0 &&
+        if (!gN3DSPerfBattleRoomActive &&
+            perfSample.battleActive == 0 &&
             !gN3DSDustPerfSampler.active &&
             !gN3DSAttackPerfSampler.active &&
             !gN3DSBattleEntryPerfSampler.active) {
