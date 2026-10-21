@@ -1998,15 +1998,6 @@ static bool Runner_tryDraw3DSWhtPxlGravFast(Runner* runner, Instance* inst) {
         251u, 251u, 251u, 251u, 251u, 255u
     };
 
-    if (!Renderer_isFiniteFloat((float) inst->x) || !Renderer_isFiniteFloat((float) inst->y) ||
-        !Renderer_isFiniteFloat(inst->imageXscale) || !Renderer_isFiniteFloat(inst->imageYscale) ||
-        !Renderer_isFiniteFloat(inst->imageAngle) || !Renderer_isFiniteFloat(inst->imageAlpha)) {
-        return false;
-    }
-    // A solid rectangle is rotation-invariant only for 90-degree multiples, but
-    // the canonical particle never rotates. Fall back if gameplay/mod code adds rotation.
-    if (fabsf(inst->imageAngle) >= 0.001f) return false;
-
     int32_t frame = (int32_t) inst->imageIndex % 12;
     if (frame < 0) frame += 12;
     uint32_t gray = kFrameGray[frame];
@@ -2020,15 +2011,14 @@ static bool Runner_tryDraw3DSWhtPxlGravFast(Runner* runner, Instance* inst) {
     float height = 2.0f * inst->imageYscale;
     if (width == 0.0f || height == 0.0f) return true;
 
-    runner->renderer->vtable->drawRectangle(
+    N3DSRenderer_drawDustRectFast(
         runner->renderer,
         (float) inst->x,
         (float) inst->y,
-        (float) inst->x + width,
-        (float) inst->y + height,
+        width,
+        height,
         color,
-        inst->imageAlpha,
-        false
+        inst->imageAlpha
     );
     return true;
 }
@@ -2185,14 +2175,27 @@ void Runner_draw(Runner* runner) {
             int32_t codeId = drawNormalSlot >= 0
                 ? ResolvedEventTable_lookup(&runner->eventTable, inst->objectIndex, drawNormalSlot, &ownerObjectIndex)
                 : -1;
-            if (codeId < 0 && !Runner_instanceIntersectsCurrentView(runner, inst)) continue;
 #ifdef __3DS__
-            // The canonical dust fast path emits only a solid rectangle, so it
-            // cannot import or evict atlas pages. Skip per-particle atlas
-            // attribution bookkeeping while keeping draw order and semantics.
-            bool n3dsWhtPxlFastDraw =
-                codeId < 0 && Runner_is3DSWhtPxlGravFastEligible(runner, inst);
+            // Canonical obj_whtpxlgrav has no Draw event. Handle it before the
+            // generic sprite bbox/culling and atlas-attribution path. A custom
+            // Draw event still wins and falls through to the normal VM route.
+            if (codeId < 0 && Runner_is3DSWhtPxlGravFastEligible(runner, inst)) {
+                bool offsetDust = false;
+                double savedDustY = 0.0;
+                if (runner->osType == OS_3DS && n3dsBattleActiveForDraw &&
+                    Runner_shouldOffset3DSTopBattleInstance(runner, inst)) {
+                    offsetDust = true;
+                    savedDustY = inst->y;
+                    inst->y += k3DSTopBattleEnemyInstanceYOffset;
+                }
+                (void) Runner_tryDraw3DSWhtPxlGravFast(runner, inst);
+                if (offsetDust) inst->y = savedDustY;
+                runner->frameDrawInstances++;
+                runner->frameDrawInstancesMs += Runner_nowMs() - drawStartMs;
+                continue;
+            }
 #endif
+            if (codeId < 0 && !Runner_instanceIntersectsCurrentView(runner, inst)) continue;
             bool offsetTopBattleEnemy = false;
             double savedY = 0.0;
 #ifdef __3DS__
@@ -2202,37 +2205,20 @@ void Runner_draw(Runner* runner) {
                 savedY = inst->y;
                 inst->y += k3DSTopBattleEnemyInstanceYOffset;
             }
-#endif
-#ifdef __3DS__
-            uint32_t importStart = 0u;
-            uint32_t evictionStart = 0u;
-            uint32_t importEventStart = 0u;
-            if (!n3dsWhtPxlFastDraw && runner->renderer != nullptr) {
-                importStart = N3DSRenderer_getFramePageImports(runner->renderer);
-                evictionStart = N3DSRenderer_getFramePageEvictions(runner->renderer);
-                importEventStart = N3DSRenderer_getFramePageImportEventCount(runner->renderer);
-            }
+            uint32_t importStart = runner->renderer != nullptr ? N3DSRenderer_getFramePageImports(runner->renderer) : 0u;
+            uint32_t evictionStart = runner->renderer != nullptr ? N3DSRenderer_getFramePageEvictions(runner->renderer) : 0u;
+            uint32_t importEventStart = runner->renderer != nullptr ? N3DSRenderer_getFramePageImportEventCount(runner->renderer) : 0u;
 #endif
             if (codeId >= 0) {
                 Runner_executeResolvedEvent(runner, inst, EVENT_DRAW, DRAW_NORMAL, codeId, ownerObjectIndex);
             } else if (runner->renderer != nullptr) {
-#ifdef __3DS__
-                if (n3dsWhtPxlFastDraw) {
-                    (void) Runner_tryDraw3DSWhtPxlGravFast(runner, inst);
-                } else {
-                    Renderer_drawSelf(runner->renderer, inst);
-                }
-#else
                 Renderer_drawSelf(runner->renderer, inst);
-#endif
             }
 #ifdef __3DS__
             if (offsetTopBattleEnemy) {
                 inst->y = savedY;
             }
-            if (!n3dsWhtPxlFastDraw) {
-                Runner_capture3DSAtlasImportAttribution(runner, inst, importStart, evictionStart, importEventStart, N3DS_ATLAS_IMPORT_PASS_MAIN);
-            }
+            Runner_capture3DSAtlasImportAttribution(runner, inst, importStart, evictionStart, importEventStart, N3DS_ATLAS_IMPORT_PASS_MAIN);
 #endif
             runner->frameDrawInstances++;
             runner->frameDrawInstancesMs += Runner_nowMs() - drawStartMs;
