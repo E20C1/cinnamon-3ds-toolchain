@@ -5063,6 +5063,31 @@ static void N3DSRenderer_drawRectangle(Renderer* base, float x1, float y1, float
     }
 }
 
+void N3DSRenderer_drawDustRectFast(Renderer* base, float x, float y, float width, float height, uint32_t color, float alpha) {
+    if (base == NULL ||
+        !Renderer_isFiniteFloat(x) || !Renderer_isFiniteFloat(y) ||
+        !Renderer_isFiniteFloat(width) || !Renderer_isFiniteFloat(height) ||
+        !Renderer_isFiniteFloat(alpha) ||
+        width == 0.0f || height == 0.0f) {
+        return;
+    }
+
+    N3DSRenderer* renderer = (N3DSRenderer*) base;
+    float sx0 = N3DSRenderer_transformScreenX(renderer, x);
+    float sy0 = N3DSRenderer_transformScreenY(renderer, y);
+    float sx1 = N3DSRenderer_transformScreenX(renderer, x + width);
+    float sy1 = N3DSRenderer_transformScreenY(renderer, y + height);
+    float sx = sx0 < sx1 ? sx0 : sx1;
+    float sy = sy0 < sy1 ? sy0 : sy1;
+    float sw = fabsf(sx1 - sx0);
+    float sh = fabsf(sy1 - sy0);
+    if (sw <= 0.0f || sh <= 0.0f) return;
+    if (N3DSRenderer_isScreenRectOffscreen(renderer, sx, sy, sw, sh)) return;
+
+    C2D_DrawRectSolid(sx, sy, 0.5f, sw, sh, N3DSRenderer_makeColor(color, alpha));
+    N3DSRenderer_noteC2DDraws(renderer, 1u);
+}
+
 static void N3DSRenderer_drawLine(Renderer* base, float x1, float y1, float x2, float y2, float width, uint32_t color, float alpha) {
     if (!Renderer_isFiniteFloat(x1) || !Renderer_isFiniteFloat(y1) ||
         !Renderer_isFiniteFloat(x2) || !Renderer_isFiniteFloat(y2) ||
