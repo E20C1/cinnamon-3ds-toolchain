@@ -76,6 +76,12 @@ typedef struct {
     uint32_t residentDirectVRAMBytes;
     uint32_t residentDirectVRAMLimitBytes;
     uint32_t atlasBlobReads;
+    uint32_t atlasBlobCacheBytes;
+    uint32_t atlasBlobReadPageCount;
+    uint16_t atlasBlobReadPages[N3DS_PERF_IMPORT_PAGE_CAP];
+    uint32_t frameImportEventCount;
+    uint16_t frameImportEventPages[N3DS_PERF_IMPORT_PAGE_CAP];
+    int32_t frameImportEventTPAGs[N3DS_PERF_IMPORT_PAGE_CAP];
     uint32_t directBlobReads;
     uint32_t pageImports;
     uint32_t pageEvictions;
@@ -922,6 +928,25 @@ static N3DSDustPerfFrame N3DSDustPerf_captureFrame(Runner* runner, Renderer* ren
     sample.residentDirectVRAMBytes = N3DSRenderer_getResidentDirectAssetVRAMBytes(renderer);
     sample.residentDirectVRAMLimitBytes = N3DSRenderer_getResidentDirectAssetVRAMLimitBytes(renderer);
     sample.atlasBlobReads = N3DSRenderer_getFrameBlobReads(renderer);
+    sample.atlasBlobCacheBytes = N3DSRenderer_getCachedAtlasT3xBytes(renderer);
+    sample.atlasBlobReadPageCount = N3DSRenderer_getFrameBlobReadEventCount(renderer);
+    if (sample.atlasBlobReadPageCount > N3DS_PERF_IMPORT_PAGE_CAP) sample.atlasBlobReadPageCount = N3DS_PERF_IMPORT_PAGE_CAP;
+    repeat(sample.atlasBlobReadPageCount, eventIndex) {
+        uint16_t pageIndex = UINT16_MAX;
+        if (N3DSRenderer_getFrameBlobReadEvent(renderer, eventIndex, &pageIndex)) {
+            sample.atlasBlobReadPages[eventIndex] = pageIndex;
+        }
+    }
+    sample.frameImportEventCount = N3DSRenderer_getFramePageImportEventCount(renderer);
+    if (sample.frameImportEventCount > N3DS_PERF_IMPORT_PAGE_CAP) sample.frameImportEventCount = N3DS_PERF_IMPORT_PAGE_CAP;
+    repeat(sample.frameImportEventCount, eventIndex) {
+        uint16_t pageIndex = UINT16_MAX;
+        int32_t tpagIndex = -1;
+        if (N3DSRenderer_getFramePageImportEvent(renderer, eventIndex, &pageIndex, &tpagIndex)) {
+            sample.frameImportEventPages[eventIndex] = pageIndex;
+            sample.frameImportEventTPAGs[eventIndex] = tpagIndex;
+        }
+    }
     sample.directBlobReads = N3DSRenderer_getFrameDirectBlobReads(renderer);
     sample.pageImports = N3DSRenderer_getFramePageImports(renderer);
     sample.pageEvictions = N3DSRenderer_getFramePageEvictions(renderer);
@@ -1001,7 +1026,7 @@ static void N3DSPerf_writeEvent(
         "frame_begin_ms,renderer_begin_ms,draw_views_ms,overlay_ms,renderer_end_ms,frame_end_ms,"
         "c3d_cpu_ms,gpu_prev_ms,cmd_buf_pct,sprite_calls,part_calls,c2d_flushes,"
         "atlas_vram_bytes,atlas_vram_limit,atlas_resident_pages,atlas_page_limit,direct_vram_bytes,direct_vram_limit,"
-        "atlas_blob_reads,direct_blob_reads,page_imports,page_evictions,import_failures,"
+        "atlas_blob_reads,atlas_blob_read_pages,atlas_blob_cache_bytes,frame_import_events,direct_blob_reads,page_imports,page_evictions,import_failures,"
         "direct_asset_loads,direct_load_kind,direct_load_index,direct_load_frame,direct_load_vram_bytes,"
         "direct_load_cached_blob,texture_switches,atlas_object,atlas_object_name,atlas_instance,"
         "atlas_instance_sprite,atlas_instance_sprite_name,atlas_instance_subimg,atlas_instance_tpag,"
@@ -1041,6 +1066,38 @@ static void N3DSPerf_writeEvent(
             if (candidate != NULL) atlasTriggerSpriteName = candidate;
         }
         const char* atlasPassName = sample->atlasImportPass == 1u ? "main" : sample->atlasImportPass == 2u ? "replay" : "";
+
+        char atlasBlobReadPages[128];
+        atlasBlobReadPages[0] = '\0';
+        size_t atlasBlobReadPagesCursor = 0;
+        repeat(sample->atlasBlobReadPageCount, eventIndex) {
+            int written = snprintf(
+                atlasBlobReadPages + atlasBlobReadPagesCursor,
+                sizeof(atlasBlobReadPages) - atlasBlobReadPagesCursor,
+                "%s%u",
+                eventIndex == 0 ? "" : "|",
+                (unsigned int) sample->atlasBlobReadPages[eventIndex]
+            );
+            if (written <= 0 || (size_t) written >= sizeof(atlasBlobReadPages) - atlasBlobReadPagesCursor) break;
+            atlasBlobReadPagesCursor += (size_t) written;
+        }
+
+        char frameImportEvents[256];
+        frameImportEvents[0] = '\0';
+        size_t frameImportEventsCursor = 0;
+        repeat(sample->frameImportEventCount, eventIndex) {
+            int written = snprintf(
+                frameImportEvents + frameImportEventsCursor,
+                sizeof(frameImportEvents) - frameImportEventsCursor,
+                "%s%u:%ld",
+                eventIndex == 0 ? "" : "|",
+                (unsigned int) sample->frameImportEventPages[eventIndex],
+                (long) sample->frameImportEventTPAGs[eventIndex]
+            );
+            if (written <= 0 || (size_t) written >= sizeof(frameImportEvents) - frameImportEventsCursor) break;
+            frameImportEventsCursor += (size_t) written;
+        }
+
         char atlasPages[128];
         atlasPages[0] = '\0';
         size_t atlasPagesCursor = 0;
@@ -1094,10 +1151,16 @@ static void N3DSPerf_writeEvent(
             (unsigned long) sample->residentDirectVRAMBytes,
             (unsigned long) sample->residentDirectVRAMLimitBytes);
         fprintf(file,
-            ",%lu,%lu,%lu,%lu,%lu,%lu,%s,%ld,%ld,%lu,%ld,%lu",
-            (unsigned long) sample->atlasBlobReads, (unsigned long) sample->directBlobReads,
-            (unsigned long) sample->pageImports, (unsigned long) sample->pageEvictions,
-            (unsigned long) sample->importFailures, (unsigned long) sample->directAssetLoads,
+            ",%lu,%s,%lu,%s,%lu,%lu,%lu,%lu,%lu,%lu,%s,%ld,%ld,%lu,%ld,%lu",
+            (unsigned long) sample->atlasBlobReads,
+            atlasBlobReadPages,
+            (unsigned long) sample->atlasBlobCacheBytes,
+            frameImportEvents,
+            (unsigned long) sample->directBlobReads,
+            (unsigned long) sample->pageImports,
+            (unsigned long) sample->pageEvictions,
+            (unsigned long) sample->importFailures,
+            (unsigned long) sample->directAssetLoads,
             N3DSPerf_directLoadKindName(sample->directLastLoadKind),
             (long) sample->directLastLoadIndex,
             (long) sample->directLastLoadFrame,
