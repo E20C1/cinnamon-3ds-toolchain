@@ -3517,6 +3517,20 @@ static void N3DSRenderer_preloadFontPages(N3DSRenderer* renderer) {
     }
 }
 
+static bool N3DSRenderer_isUndertaleBattleRoom(N3DSRenderer* renderer, Runner* runner) {
+    if (renderer == NULL || runner == NULL || renderer->base.dataWin == NULL) return false;
+    DataWin* dw = renderer->base.dataWin;
+
+    repeat(arrlen(runner->instances), instanceIndex) {
+        Instance* inst = runner->instances[instanceIndex];
+        if (inst == NULL || inst->destroyed || !inst->active) continue;
+        if (inst->objectIndex < 0 || (uint32_t) inst->objectIndex >= dw->objt.count) continue;
+        const char* objectName = dw->objt.objects[inst->objectIndex].name;
+        if (objectName != NULL && strcmp(objectName, "obj_battlecontroller") == 0) return true;
+    }
+    return false;
+}
+
 static void N3DSRenderer_prewarmRoomBlobCache(N3DSRenderer* renderer, Runner* runner) {
     if (renderer == NULL || runner == NULL || runner->currentRoom == NULL || renderer->atlasPageCount == 0) return;
 
@@ -3530,7 +3544,7 @@ static void N3DSRenderer_prewarmRoomBlobCache(N3DSRenderer* renderer, Runner* ru
     // therefore are not guaranteed to appear in a static room manifest. Prewarm
     // only their compressed atlas blobs: this removes first-use storage I/O
     // without increasing resident GPU texture pages.
-    if (dw != NULL) {
+    if (dw != NULL && N3DSRenderer_isUndertaleBattleRoom(renderer, runner)) {
         static const char* const kBattleTransientSpriteNames[] = {
             "spr_dmgnum_o",
             "spr_blconsm",
@@ -3723,11 +3737,13 @@ static void N3DSRenderer_prewarmRoom(Renderer* base, Runner* runner) {
     }
     renderer->lastPrewarmedRoom = room;
 
-    // Keep the three common FIGHT sprites as compressed direct blobs in RAM.
-    // Texture creation remains lazy, so this shifts SD/ROMFS I/O away from the
-    // timing-sensitive attack frames without increasing direct texture residency.
-    N3DSRenderer_prewarmBattleDirectSpriteBlobs(renderer);
-    N3DSRenderer_prewarmJapaneseDirectFontBlobs(renderer);
+    // Battle-only direct blob warming avoids moving this I/O onto unrelated
+    // room transitions. Texture creation remains lazy, so GPU residency does
+    // not increase here.
+    if (N3DSRenderer_isUndertaleBattleRoom(renderer, runner)) {
+        N3DSRenderer_prewarmBattleDirectSpriteBlobs(renderer);
+        N3DSRenderer_prewarmJapaneseDirectFontBlobs(renderer);
+    }
     N3DSRenderer_prewarmRoomBlobCache(renderer, runner);
 }
 
