@@ -1978,6 +1978,12 @@ static bool Runner_is3DSWhtPxlGravFastEligible(Runner* runner, Instance* inst) {
     if (runner == NULL || inst == NULL || runner->renderer == NULL || runner->osType != OS_3DS) return false;
     if ((Runner_get3DSObjectTraits(runner, inst->objectIndex) & N3DS_OBJ_TRAIT_WHTPXLGRAV) == 0) return false;
     if ((Runner_get3DSSpriteTraits(runner, inst->spriteIndex) & N3DS_SPR_TRAIT_WHTPXL) == 0) return false;
+    if (!Renderer_isFiniteFloat((float) inst->x) || !Renderer_isFiniteFloat((float) inst->y) ||
+        !Renderer_isFiniteFloat(inst->imageXscale) || !Renderer_isFiniteFloat(inst->imageYscale) ||
+        !Renderer_isFiniteFloat(inst->imageAngle) || !Renderer_isFiniteFloat(inst->imageAlpha) ||
+        !Renderer_isFiniteFloat(inst->imageIndex)) return false;
+    // A solid rectangle matches the canonical sprite only while it is unrotated.
+    if (fabsf(inst->imageAngle) >= 0.001f) return false;
     return true;
 }
 
