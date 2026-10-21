@@ -1831,6 +1831,13 @@ static bool N3DSRenderer_evictLRUDirectAsset(N3DSRenderer* renderer, const N3DSD
     return true;
 }
 
+static bool N3DSRenderer_isPriorityDirectFontBlob(N3DSRenderer* renderer, uint32_t fontIndex) {
+    if (renderer == NULL || renderer->base.dataWin == NULL) return false;
+    if (fontIndex >= renderer->directFontAssetCount || fontIndex >= renderer->base.dataWin->font.count) return false;
+    Font* font = &renderer->base.dataWin->font.fonts[fontIndex];
+    return font->name != NULL && strncmp(font->name, "fnt_ja_", 7) == 0;
+}
+
 static bool N3DSRenderer_evictLRUDirectAssetBlob(N3DSRenderer* renderer, const N3DSDirectTextureAsset* excludeAsset) {
     if (renderer == NULL) return false;
 
@@ -1864,12 +1871,28 @@ static bool N3DSRenderer_evictLRUDirectAssetBlob(N3DSRenderer* renderer, const N
         }
     }
 
+    // Japanese direct fonts are expensive to cold-load during battle dialogue.
+    // Prefer evicting any other non-resident direct blob first. This is a soft
+    // priority only: if the cache consists solely of Japanese font blobs, fall
+    // back to normal LRU so the configured RAM limit remains enforceable.
     repeat(renderer->directFontAssetCount, fontIndex) {
+        if (N3DSRenderer_isPriorityDirectFontBlob(renderer, (uint32_t) fontIndex)) continue;
         N3DSDirectTextureAsset* asset = &renderer->directFontAssets[fontIndex];
         if (asset->blobData == NULL || asset->ready || asset == excludeAsset) continue;
         if (asset->blobLastUsedStamp < bestStamp) {
             bestStamp = asset->blobLastUsedStamp;
             bestAsset = asset;
+        }
+    }
+
+    if (bestAsset == NULL) {
+        repeat(renderer->directFontAssetCount, fontIndex) {
+            N3DSDirectTextureAsset* asset = &renderer->directFontAssets[fontIndex];
+            if (asset->blobData == NULL || asset->ready || asset == excludeAsset) continue;
+            if (asset->blobLastUsedStamp < bestStamp) {
+                bestStamp = asset->blobLastUsedStamp;
+                bestAsset = asset;
+            }
         }
     }
 
@@ -3503,20 +3526,29 @@ static void N3DSRenderer_prewarmRoomBlobCache(N3DSRenderer* renderer, Runner* ru
     bool* seenPages = safeCalloc(renderer->atlasPageCount, sizeof(bool));
     uint32_t roomIndex = UINT32_MAX;
 
-    // Damage digits are dynamically created during FIGHT and therefore are not
-    // guaranteed to appear in a room manifest. Prewarm only their compressed
-    // atlas blobs: this removes first-hit storage I/O without consuming an
-    // additional resident GPU texture slot or forcing the sprite onto direct.
+    // These sprites are created dynamically by UNDERTALE's battle scripts and
+    // therefore are not guaranteed to appear in a static room manifest. Prewarm
+    // only their compressed atlas blobs: this removes first-use storage I/O
+    // without increasing resident GPU texture pages.
     if (dw != NULL) {
-        repeat(dw->sprt.count, spriteIndex) {
-            Sprite* sprite = &dw->sprt.sprites[spriteIndex];
-            if (sprite->name == NULL || strcmp(sprite->name, "spr_dmgnum_o") != 0) continue;
-            repeat(sprite->textureCount, frameIndex) {
-                int32_t tpagIndex = sprite->tpagIndices[frameIndex];
-                N3DSRenderer_prewarmTPAGBlobOnly(renderer, seenPages, tpagIndex, &remainingBlobBytes);
-                if (remainingBlobBytes == 0) goto done;
+        static const char* const kBattleTransientSpriteNames[] = {
+            "spr_dmgnum_o",
+            "spr_blconsm",
+            "spr_froghead",
+            "spr_froglegs",
+        };
+        repeat(sizeof(kBattleTransientSpriteNames) / sizeof(kBattleTransientSpriteNames[0]), nameIndex) {
+            const char* wantedName = kBattleTransientSpriteNames[nameIndex];
+            repeat(dw->sprt.count, spriteIndex) {
+                Sprite* sprite = &dw->sprt.sprites[spriteIndex];
+                if (sprite->name == NULL || strcmp(sprite->name, wantedName) != 0) continue;
+                repeat(sprite->textureCount, frameIndex) {
+                    int32_t tpagIndex = sprite->tpagIndices[frameIndex];
+                    N3DSRenderer_prewarmTPAGBlobOnly(renderer, seenPages, tpagIndex, &remainingBlobBytes);
+                    if (remainingBlobBytes == 0) goto done;
+                }
+                break;
             }
-            break;
         }
     }
 
@@ -3626,6 +3658,55 @@ static void N3DSRenderer_prewarmBattleDirectSpriteBlobs(N3DSRenderer* renderer) 
 #endif
 }
 
+static void N3DSRenderer_prewarmJapaneseDirectFontBlobs(N3DSRenderer* renderer) {
+#if !N3DS_ENABLE_DIRECT_ASSETS
+    (void) renderer;
+    return;
+#else
+    if (renderer == NULL || renderer->base.dataWin == NULL) return;
+
+    DataWin* dw = renderer->base.dataWin;
+    int32_t currentFont = renderer->base.drawFont;
+
+    // Refresh the currently selected Japanese font first, then warm the remaining
+    // Japanese direct-font blobs. Only compressed .t3x data is loaded here; GPU
+    // texture creation remains lazy and the 3 MiB direct VRAM budget is unchanged.
+    if (currentFont >= 0 &&
+        (uint32_t) currentFont < dw->font.count &&
+        (uint32_t) currentFont < renderer->directFontAssetCount) {
+        Font* font = &dw->font.fonts[currentFont];
+        if (font->name != NULL && strncmp(font->name, "fnt_ja_", 7) == 0) {
+            char path[256];
+            snprintf(path, sizeof(path), "fonts/font_%05d.t3x", (int) currentFont);
+            (void) N3DSRenderer_ensureDirectTextureBlobLoaded(renderer, &renderer->directFontAssets[currentFont], path);
+        }
+    }
+
+    repeat(dw->font.count, fontIndex) {
+        if ((int32_t) fontIndex == currentFont || (uint32_t) fontIndex >= renderer->directFontAssetCount) continue;
+        Font* font = &dw->font.fonts[fontIndex];
+        if (font->name == NULL || strncmp(font->name, "fnt_ja_", 7) != 0) continue;
+
+        char path[256];
+        snprintf(path, sizeof(path), "fonts/font_%05lu.t3x", (unsigned long) fontIndex);
+        (void) N3DSRenderer_ensureDirectTextureBlobLoaded(renderer, &renderer->directFontAssets[fontIndex], path);
+    }
+
+    // If warming the family had to recycle cache entries, touch the current font
+    // once more so the active dialogue font remains the newest preferred blob.
+    if (currentFont >= 0 &&
+        (uint32_t) currentFont < dw->font.count &&
+        (uint32_t) currentFont < renderer->directFontAssetCount) {
+        Font* font = &dw->font.fonts[currentFont];
+        if (font->name != NULL && strncmp(font->name, "fnt_ja_", 7) == 0) {
+            char path[256];
+            snprintf(path, sizeof(path), "fonts/font_%05d.t3x", (int) currentFont);
+            (void) N3DSRenderer_ensureDirectTextureBlobLoaded(renderer, &renderer->directFontAssets[currentFont], path);
+        }
+    }
+#endif
+}
+
 static void N3DSRenderer_prewarmRoom(Renderer* base, Runner* runner) {
     if (base == NULL || runner == NULL || runner->currentRoom == NULL) return;
 
@@ -3646,6 +3727,7 @@ static void N3DSRenderer_prewarmRoom(Renderer* base, Runner* runner) {
     // Texture creation remains lazy, so this shifts SD/ROMFS I/O away from the
     // timing-sensitive attack frames without increasing direct texture residency.
     N3DSRenderer_prewarmBattleDirectSpriteBlobs(renderer);
+    N3DSRenderer_prewarmJapaneseDirectFontBlobs(renderer);
     N3DSRenderer_prewarmRoomBlobCache(renderer, runner);
 }
 
