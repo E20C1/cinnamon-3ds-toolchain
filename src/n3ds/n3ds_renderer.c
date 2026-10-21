@@ -2588,6 +2588,22 @@ static bool N3DSRenderer_tryLoadDirectBackgroundImage(N3DSRenderer* renderer, in
     return true;
 }
 
+static bool N3DSRenderer_shouldUseDirectFontAsset(const Font* font) {
+#if !N3DS_ENABLE_DIRECT_ASSETS
+    (void) font;
+    return false;
+#else
+    // Direct font assets exist to preserve the smoother alpha coverage needed by
+    // the Japanese fonts after the 3DS battle-view minification. Keeping every
+    // ordinary GameMaker font in both the pinned atlas set and the shared direct
+    // texture LRU duplicates residency and can evict much larger battle assets.
+    return font != NULL &&
+        !font->isSpriteFont &&
+        font->name != NULL &&
+        strncmp(font->name, "fnt_ja_", 7) == 0;
+#endif
+}
+
 static bool N3DSRenderer_tryResolveDirectFontImage(N3DSRenderer* renderer, int32_t fontIndex, C2D_Image* outImage, Tex3DS_SubTexture* outSubtex) {
 #if !N3DS_ENABLE_DIRECT_ASSETS
     (void) renderer;
@@ -2598,6 +2614,8 @@ static bool N3DSRenderer_tryResolveDirectFontImage(N3DSRenderer* renderer, int32
 #endif
     if (renderer == NULL || outImage == NULL || outSubtex == NULL) return false;
     if (fontIndex < 0 || (uint32_t) fontIndex >= renderer->directFontAssetCount) return false;
+    if (renderer->base.dataWin == NULL || (uint32_t) fontIndex >= renderer->base.dataWin->font.count) return false;
+    if (!N3DSRenderer_shouldUseDirectFontAsset(&renderer->base.dataWin->font.fonts[fontIndex])) return false;
 
     N3DSDirectTextureAsset* asset = &renderer->directFontAssets[fontIndex];
     char path[256];
@@ -3463,6 +3481,11 @@ static void N3DSRenderer_preloadFontPages(N3DSRenderer* renderer) {
     repeat(dw->font.count, i) {
         Font* font = &dw->font.fonts[i];
         if (font->isSpriteFont || font->tpagIndex < 0) continue;
+        // A Japanese font that is intentionally served from its higher-quality
+        // direct asset must not also permanently occupy a pinned atlas page.
+        // If the direct asset is unavailable at runtime, drawTextCommon falls
+        // back to the atlas path and loads the page on demand.
+        if (N3DSRenderer_shouldUseDirectFontAsset(font)) continue;
 
         uint32_t pageIndex = 0;
         if (!N3DSRenderer_getPageIndexForTPAG(renderer, font->tpagIndex, &pageIndex)) continue;
@@ -3479,6 +3502,23 @@ static void N3DSRenderer_prewarmRoomBlobCache(N3DSRenderer* renderer, Runner* ru
     uint32_t remainingBlobBytes = renderer->isNew3DS ? N3DS_PREWARM_BLOB_BYTES_NEW3DS : N3DS_PREWARM_BLOB_BYTES_OLD3DS;
     bool* seenPages = safeCalloc(renderer->atlasPageCount, sizeof(bool));
     uint32_t roomIndex = UINT32_MAX;
+
+    // Damage digits are dynamically created during FIGHT and therefore are not
+    // guaranteed to appear in a room manifest. Prewarm only their compressed
+    // atlas blobs: this removes first-hit storage I/O without consuming an
+    // additional resident GPU texture slot or forcing the sprite onto direct.
+    if (dw != NULL) {
+        repeat(dw->sprt.count, spriteIndex) {
+            Sprite* sprite = &dw->sprt.sprites[spriteIndex];
+            if (sprite->name == NULL || strcmp(sprite->name, "spr_dmgnum_o") != 0) continue;
+            repeat(sprite->textureCount, frameIndex) {
+                int32_t tpagIndex = sprite->tpagIndices[frameIndex];
+                N3DSRenderer_prewarmTPAGBlobOnly(renderer, seenPages, tpagIndex, &remainingBlobBytes);
+                if (remainingBlobBytes == 0) goto done;
+            }
+            break;
+        }
+    }
 
     if (dw != NULL && dw->room.rooms != NULL && room >= dw->room.rooms && room < (dw->room.rooms + dw->room.count)) {
         roomIndex = (uint32_t) (room - dw->room.rooms);
@@ -3555,6 +3595,37 @@ done:
     free(seenPages);
 }
 
+static void N3DSRenderer_prewarmBattleDirectSpriteBlobs(N3DSRenderer* renderer) {
+#if !N3DS_ENABLE_DIRECT_ASSETS
+    (void) renderer;
+    return;
+#else
+    if (renderer == NULL || renderer->base.dataWin == NULL) return;
+
+    static const char* const kBattleSpriteNames[] = {
+        "spr_targetchoice",
+        "spr_target",
+        "spr_strike",
+    };
+
+    DataWin* dw = renderer->base.dataWin;
+    repeat(sizeof(kBattleSpriteNames) / sizeof(kBattleSpriteNames[0]), nameIndex) {
+        const char* wantedName = kBattleSpriteNames[nameIndex];
+        repeat(dw->sprt.count, spriteIndex) {
+            Sprite* sprite = &dw->sprt.sprites[spriteIndex];
+            if (sprite->name == NULL || strcmp(sprite->name, wantedName) != 0) continue;
+            if ((uint32_t) spriteIndex >= renderer->directSpriteAssetCount) break;
+
+            N3DSDirectSpriteAsset* spriteAsset = &renderer->directSpriteAssets[spriteIndex];
+            char path[256];
+            snprintf(path, sizeof(path), "sprites/spr_%05lu.t3x", (unsigned long) spriteIndex);
+            (void) N3DSRenderer_ensureDirectTextureBlobLoaded(renderer, &spriteAsset->sheetAsset, path);
+            break;
+        }
+    }
+#endif
+}
+
 static void N3DSRenderer_prewarmRoom(Renderer* base, Runner* runner) {
     if (base == NULL || runner == NULL || runner->currentRoom == NULL) return;
 
@@ -3570,6 +3641,11 @@ static void N3DSRenderer_prewarmRoom(Renderer* base, Runner* runner) {
         renderer->pendingOld3DSAtlasFlush = true;
     }
     renderer->lastPrewarmedRoom = room;
+
+    // Keep the three common FIGHT sprites as compressed direct blobs in RAM.
+    // Texture creation remains lazy, so this shifts SD/ROMFS I/O away from the
+    // timing-sensitive attack frames without increasing direct texture residency.
+    N3DSRenderer_prewarmBattleDirectSpriteBlobs(renderer);
     N3DSRenderer_prewarmRoomBlobCache(renderer, runner);
 }
 
