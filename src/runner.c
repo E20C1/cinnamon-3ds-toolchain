@@ -1316,21 +1316,6 @@ void Runner_executeEvent(Runner* runner, Instance* instance, int32_t eventType, 
 static bool eventUsesBC17PerObjectDispatch(int32_t eventType) {
     return eventType == EVENT_STEP || eventType == EVENT_ALARM || eventType == EVENT_KEYBOARD || eventType == EVENT_KEYPRESS || eventType == EVENT_KEYRELEASE;
 }
-#ifdef __3DS__
-static int32_t Runner_findLive3DSWhtPxlGravObjectIndex(Runner* runner) {
-    if (runner == NULL || runner->osType != OS_3DS) return -1;
-    int32_t count = (int32_t) arrlen(runner->instances);
-    repeat(count, i) {
-        Instance* inst = runner->instances[i];
-        if (inst == NULL || !inst->active || inst->destroyed) continue;
-        if ((Runner_get3DSObjectTraits(runner, inst->objectIndex) & N3DS_OBJ_TRAIT_WHTPXLGRAV) != 0) {
-            return inst->objectIndex;
-        }
-    }
-    return -1;
-}
-#endif
-
 void Runner_executeEventForAll(Runner* runner, int32_t eventType, int32_t eventSubtype) {
     int32_t slot = EventSlotMap_lookup(&runner->eventSlotMap, eventType, eventSubtype);
     if (slot == -1) return;
@@ -1380,37 +1365,8 @@ void Runner_executeEventForAll(Runner* runner, int32_t eventType, int32_t eventS
     int32_t count = (int32_t) arrlen(runner->instances);
     if (count == 0) return;
 
-#ifdef __3DS__
-    // GMS1 Perform_Event_All normally snapshots every instance, including the
-    // hundreds of UNDERTALE dust pixels that have no Step handlers. If the
-    // resolved table confirms the exact dust object is a non-responder for this
-    // Step subtype, omit only those no-op entries from the snapshot. Object lists
-    // and instances remain untouched, so with/instance_exists semantics are unchanged.
-    int32_t skipDustObjectIndex = -1;
-    if (runner->osType == OS_3DS && eventType == EVENT_STEP) {
-        int32_t dustObjectIndex = Runner_findLive3DSWhtPxlGravObjectIndex(runner);
-        if (dustObjectIndex >= 0) {
-            int32_t ownerObjectIndex = -1;
-            if (ResolvedEventTable_lookup(&runner->eventTable, dustObjectIndex, slot, &ownerObjectIndex) < 0) {
-                skipDustObjectIndex = dustObjectIndex;
-            }
-        }
-    }
-    if (skipDustObjectIndex >= 0) {
-        arrsetlen(scratch, 0);
-        arrsetcap(scratch, count);
-        repeat(count, i) {
-            Instance* inst = runner->instances[i];
-            if (inst != NULL && inst->objectIndex == skipDustObjectIndex) continue;
-            arrput(scratch, inst);
-        }
-        count = (int32_t) arrlen(scratch);
-    } else
-#endif
-    {
-        arrsetlen(scratch, count);
-        memcpy(scratch, runner->instances, (size_t) count * sizeof(Instance*));
-    }
+    arrsetlen(scratch, count);
+    memcpy(scratch, runner->instances, (size_t) count * sizeof(Instance*));
     runner->eventDispatchInstances = scratch;
 
     repeat(count, i) {

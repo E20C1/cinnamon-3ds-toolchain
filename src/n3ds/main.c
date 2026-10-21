@@ -27,6 +27,7 @@
 #define N3DS_DUST_PERF_POST_FRAMES 8u
 #define N3DS_DUST_PERF_MAX_FRAMES 256u
 #define N3DS_PERF_IMPORT_PAGE_CAP 16u
+#define N3DS_PERF_PENDING_EVENT_CAP 8u
 #define N3DS_DUST_PERF_LOG_PATH "sdmc:/3ds/cinnamon/dust_perf.log"
 
 void N3DS_tryTriggerAsrielLed(Runner* runner);
@@ -167,6 +168,15 @@ typedef struct {
 
 static N3DSDustPerfSampler gN3DSDustPerfSampler;
 static N3DSDustPerfSampler gN3DSAttackPerfSampler;
+
+typedef struct {
+    N3DSDustPerfSampler sampler;
+    char eventName[16];
+    char activePhaseName[16];
+} N3DSPerfPendingEvent;
+
+static N3DSPerfPendingEvent gN3DSPerfPendingEvents[N3DS_PERF_PENDING_EVENT_CAP];
+static uint32_t gN3DSPerfPendingEventCount;
 
 typedef struct {
     bool touchEnabled;
@@ -1004,18 +1014,33 @@ static const char* N3DSPerf_directLoadKindName(uint32_t kind) {
     }
 }
 
-static void N3DSPerf_writeEvent(
+static void N3DSPerf_queueEvent(
+    const N3DSDustPerfSampler* sampler,
+    const char* eventName,
+    const char* activePhaseName
+) {
+    if (sampler == NULL || sampler->sampleCount == 0) return;
+    if (gN3DSPerfPendingEventCount >= N3DS_PERF_PENDING_EVENT_CAP) {
+        fprintf(stderr, "N3DS perf: pending event queue full; dropping %s-event %lu\n",
+            eventName != NULL ? eventName : "perf", (unsigned long) sampler->eventId);
+        return;
+    }
+
+    N3DSPerfPendingEvent* pending = &gN3DSPerfPendingEvents[gN3DSPerfPendingEventCount++];
+    pending->sampler = *sampler;
+    snprintf(pending->eventName, sizeof(pending->eventName), "%s", eventName != NULL ? eventName : "perf");
+    snprintf(pending->activePhaseName, sizeof(pending->activePhaseName), "%s",
+        activePhaseName != NULL ? activePhaseName : "active");
+}
+
+static void N3DSPerf_writeEventToFile(
+    FILE* file,
     N3DSDustPerfSampler* sampler,
     Runner* runner,
     const char* eventName,
     const char* activePhaseName
 ) {
-    if (sampler == NULL || sampler->sampleCount == 0) return;
-    FILE* file = fopen(N3DS_DUST_PERF_LOG_PATH, "a");
-    if (file == NULL) {
-        fprintf(stderr, "N3DS dust perf: failed to open %s\n", N3DS_DUST_PERF_LOG_PATH);
-        return;
-    }
+    if (file == NULL || sampler == NULL || sampler->sampleCount == 0) return;
 
     fprintf(file, "# %s-event %lu samples=%lu truncated=%d\n",
         eventName != NULL ? eventName : "perf",
@@ -1194,7 +1219,23 @@ static void N3DSPerf_writeEvent(
             sample->topStepObjectMs, (unsigned long) sample->topStepObjectCalls);
     }
     fprintf(file, "# end %s-event\n", eventName != NULL ? eventName : "perf");
+}
+
+static void N3DSPerf_flushQueuedEvents(Runner* runner) {
+    if (gN3DSPerfPendingEventCount == 0) return;
+
+    FILE* file = fopen(N3DS_DUST_PERF_LOG_PATH, "a");
+    if (file == NULL) {
+        fprintf(stderr, "N3DS dust perf: failed to open %s\n", N3DS_DUST_PERF_LOG_PATH);
+        return;
+    }
+
+    repeat(gN3DSPerfPendingEventCount, i) {
+        N3DSPerfPendingEvent* pending = &gN3DSPerfPendingEvents[i];
+        N3DSPerf_writeEventToFile(file, &pending->sampler, runner, pending->eventName, pending->activePhaseName);
+    }
     fclose(file);
+    gN3DSPerfPendingEventCount = 0;
 }
 
 static void N3DSDustPerf_update(
@@ -1230,7 +1271,7 @@ static void N3DSDustPerf_update(
     if (sampler->postFramesRemaining > 0) sampler->postFramesRemaining--;
     if (sampler->postFramesRemaining > 0) return;
 
-    N3DSPerf_writeEvent(sampler, runner, "dust", "dust");
+    N3DSPerf_queueEvent(sampler, "dust", "dust");
     sampler->active = false;
     sampler->truncated = false;
     sampler->sampleCount = 0;
@@ -1238,9 +1279,9 @@ static void N3DSDustPerf_update(
     sampler->preWrite = 0;
 }
 
-static void N3DSDustPerf_flushPending(N3DSDustPerfSampler* sampler, Runner* runner) {
+static void N3DSDustPerf_flushPending(N3DSDustPerfSampler* sampler) {
     if (sampler == NULL || !sampler->active || sampler->sampleCount == 0) return;
-    N3DSPerf_writeEvent(sampler, runner, "dust", "dust");
+    N3DSPerf_queueEvent(sampler, "dust", "dust");
     sampler->active = false;
     sampler->sampleCount = 0;
 }
@@ -1282,7 +1323,7 @@ static void N3DSAttackPerf_update(
     if (sampler->postFramesRemaining > 0) sampler->postFramesRemaining--;
     if (sampler->postFramesRemaining > 0) return;
 
-    N3DSPerf_writeEvent(sampler, runner, "attack", "attack");
+    N3DSPerf_queueEvent(sampler, "attack", "attack");
     sampler->active = false;
     sampler->truncated = false;
     sampler->sampleCount = 0;
@@ -1290,9 +1331,9 @@ static void N3DSAttackPerf_update(
     sampler->preWrite = 0;
 }
 
-static void N3DSAttackPerf_flushPending(N3DSDustPerfSampler* sampler, Runner* runner) {
+static void N3DSAttackPerf_flushPending(N3DSDustPerfSampler* sampler) {
     if (sampler == NULL || !sampler->active || sampler->sampleCount == 0) return;
-    N3DSPerf_writeEvent(sampler, runner, "attack", "attack");
+    N3DSPerf_queueEvent(sampler, "attack", "attack");
     sampler->active = false;
     sampler->sampleCount = 0;
 }
@@ -2311,13 +2352,17 @@ int main(int argc, char** argv) {
         N3DSDustPerfFrame perfSample = N3DSDustPerf_captureFrame(runner, renderer, frameStepMs, &renderPerf);
         N3DSDustPerf_update(&gN3DSDustPerfSampler, runner, &perfSample);
         N3DSAttackPerf_update(&gN3DSAttackPerfSampler, runner, &perfSample);
+        if (perfSample.battleActive == 0 && !gN3DSDustPerfSampler.active && !gN3DSAttackPerfSampler.active) {
+            N3DSPerf_flushQueuedEvents(runner);
+        }
 
         RunnerKeyboard_beginFrame(runner->keyboard);
         if (touchState.tapPulseFrames > 0u) touchState.tapPulseFrames--;
     }
 
-    N3DSDustPerf_flushPending(&gN3DSDustPerfSampler, runner);
-    N3DSAttackPerf_flushPending(&gN3DSAttackPerfSampler, runner);
+    N3DSDustPerf_flushPending(&gN3DSDustPerfSampler);
+    N3DSAttackPerf_flushPending(&gN3DSAttackPerfSampler);
+    N3DSPerf_flushQueuedEvents(runner);
 
     audioSystem->vtable->destroy(audioSystem);
     renderer->vtable->destroy(renderer);
