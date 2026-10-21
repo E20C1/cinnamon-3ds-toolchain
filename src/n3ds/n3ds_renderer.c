@@ -345,6 +345,8 @@ typedef struct N3DSRenderer {
     uint32_t cachedDirectT3xBytes;
     uint32_t tileLayerChunkVRAMBytes;
     uint32_t frameBlobReads;
+    uint32_t frameBlobReadEventCount;
+    uint16_t frameBlobReadEventPages[N3DS_FRAME_PAGE_IMPORT_EVENT_CAP];
     uint32_t frameDirectBlobReads;
     uint32_t framePageImports;
     uint32_t framePageEvictions;
@@ -818,6 +820,7 @@ static void N3DSRenderer_recordPageImport(N3DSRenderer* renderer, N3DSLoadedAtla
 
 static void N3DSRenderer_resetFramePerfCounters(N3DSRenderer* renderer) {
     renderer->frameBlobReads = 0;
+    renderer->frameBlobReadEventCount = 0;
     renderer->frameDirectBlobReads = 0;
     renderer->framePageImports = 0;
     renderer->framePageEvictions = 0;
@@ -1613,6 +1616,11 @@ static bool N3DSRenderer_ensurePageBlobLoaded(N3DSRenderer* renderer, uint32_t p
     renderer->cachedT3xBytes += size;
     page->blobLastUsedStamp = ++renderer->blobUseCounter;
     renderer->frameBlobReads++;
+    if (renderer->frameBlobReadEventCount < N3DS_FRAME_PAGE_IMPORT_EVENT_CAP) {
+        uint32_t eventIndex = renderer->frameBlobReadEventCount++;
+        renderer->frameBlobReadEventPages[eventIndex] =
+            pageIndex <= UINT16_MAX ? (uint16_t) pageIndex : UINT16_MAX;
+    }
     return true;
 }
 
@@ -5949,6 +5957,25 @@ uint32_t N3DSRenderer_getResidentDirectAssetVRAMLimitBytes(Renderer* base) {
 uint32_t N3DSRenderer_getFrameBlobReads(Renderer* base) {
     if (base == NULL) return 0;
     return ((N3DSRenderer*) base)->frameBlobReads;
+}
+
+uint32_t N3DSRenderer_getFrameBlobReadEventCount(Renderer* base) {
+    if (base == NULL) return 0;
+    return ((N3DSRenderer*) base)->frameBlobReadEventCount;
+}
+
+bool N3DSRenderer_getFrameBlobReadEvent(Renderer* base, uint32_t eventIndex, uint16_t* outPageIndex) {
+    if (base == NULL) return false;
+    N3DSRenderer* renderer = (N3DSRenderer*) base;
+    if (eventIndex >= renderer->frameBlobReadEventCount ||
+        eventIndex >= N3DS_FRAME_PAGE_IMPORT_EVENT_CAP) return false;
+    if (outPageIndex != NULL) *outPageIndex = renderer->frameBlobReadEventPages[eventIndex];
+    return true;
+}
+
+uint32_t N3DSRenderer_getCachedAtlasT3xBytes(Renderer* base) {
+    if (base == NULL) return 0;
+    return ((N3DSRenderer*) base)->cachedT3xBytes;
 }
 
 uint32_t N3DSRenderer_getFrameDirectBlobReads(Renderer* base) {
