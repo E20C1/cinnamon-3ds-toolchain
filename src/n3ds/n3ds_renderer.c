@@ -3650,8 +3650,10 @@ static void N3DSRenderer_prewarmBattleCriticalAtlasBlobs(N3DSRenderer* renderer,
     }
 
     // Shared battle transients are deliberately touched last so they remain MRU
-    // after the room and monster dependency scans. No Froggit-specific assets are
-    // loaded in unrelated battles anymore.
+    // after the room and monster dependency scans. Reset the per-pass dedupe mask
+    // so a page shared with a monster dependency is still re-touched here.
+    // No Froggit-specific assets are loaded in unrelated battles anymore.
+    memset(seenPages, 0, (size_t) renderer->atlasPageCount * sizeof(bool));
     static const char* const kSharedBattleSpriteNames[] = {
         "spr_blconsm",
         "spr_dmgnum_o",
