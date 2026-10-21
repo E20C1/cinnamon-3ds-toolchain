@@ -40,6 +40,7 @@ bool N3DSRenderer_isTopScreenBattleViewActive(Renderer* renderer);
 void N3DSRenderer_setTopScreenBattleViewActive(Renderer* renderer, bool active);
 int32_t N3DSRenderer_findTileEntryIndex(Renderer* renderer, int32_t backgroundIndex, int32_t srcX, int32_t srcY, int32_t srcW, int32_t srcH);
 bool N3DSRenderer_drawCachedTileEntry(Renderer* renderer, int32_t tileEntryIndex, float drawX, float drawY, float xscale, float yscale, uint32_t color, float alpha);
+void N3DSRenderer_drawDustRectFast(Renderer* renderer, float x, float y, float width, float height, uint32_t color, float alpha);
 int32_t N3DSRenderer_createTileLayerChunkCache(Renderer* renderer, int32_t roomWidth, int32_t roomHeight, const TileLayerRenderCache* cache);
 bool N3DSRenderer_drawTileLayerChunkCache(Renderer* renderer, int32_t cacheId, float layerOffsetX, float layerOffsetY, float alpha);
 void N3DSRenderer_destroyTileLayerChunkCache(Renderer* renderer, int32_t cacheId);
