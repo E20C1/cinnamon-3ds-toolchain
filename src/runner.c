@@ -1974,10 +1974,15 @@ static void rebuildDrawableCacheIfDirty(Runner* runner) {
 }
 
 #ifdef __3DS__
-static bool Runner_tryDraw3DSWhtPxlGravFast(Runner* runner, Instance* inst) {
+static bool Runner_is3DSWhtPxlGravFastEligible(Runner* runner, Instance* inst) {
     if (runner == NULL || inst == NULL || runner->renderer == NULL || runner->osType != OS_3DS) return false;
     if ((Runner_get3DSObjectTraits(runner, inst->objectIndex) & N3DS_OBJ_TRAIT_WHTPXLGRAV) == 0) return false;
     if ((Runner_get3DSSpriteTraits(runner, inst->spriteIndex) & N3DS_SPR_TRAIT_WHTPXL) == 0) return false;
+    return true;
+}
+
+static bool Runner_tryDraw3DSWhtPxlGravFast(Runner* runner, Instance* inst) {
+    if (!Runner_is3DSWhtPxlGravFastEligible(runner, inst)) return false;
 
     // The original UNDERTALE spr_pixwht is twelve opaque 2x2 solid-gray frames.
     // Preserve image_index animation, image_blend, image_alpha and scaling while
@@ -2175,6 +2180,13 @@ void Runner_draw(Runner* runner) {
                 ? ResolvedEventTable_lookup(&runner->eventTable, inst->objectIndex, drawNormalSlot, &ownerObjectIndex)
                 : -1;
             if (codeId < 0 && !Runner_instanceIntersectsCurrentView(runner, inst)) continue;
+#ifdef __3DS__
+            // The canonical dust fast path emits only a solid rectangle, so it
+            // cannot import or evict atlas pages. Skip per-particle atlas
+            // attribution bookkeeping while keeping draw order and semantics.
+            bool n3dsWhtPxlFastDraw =
+                codeId < 0 && Runner_is3DSWhtPxlGravFastEligible(runner, inst);
+#endif
             bool offsetTopBattleEnemy = false;
             double savedY = 0.0;
 #ifdef __3DS__
@@ -2186,15 +2198,22 @@ void Runner_draw(Runner* runner) {
             }
 #endif
 #ifdef __3DS__
-            uint32_t importStart = runner->renderer != nullptr ? N3DSRenderer_getFramePageImports(runner->renderer) : 0u;
-            uint32_t evictionStart = runner->renderer != nullptr ? N3DSRenderer_getFramePageEvictions(runner->renderer) : 0u;
-            uint32_t importEventStart = runner->renderer != nullptr ? N3DSRenderer_getFramePageImportEventCount(runner->renderer) : 0u;
+            uint32_t importStart = 0u;
+            uint32_t evictionStart = 0u;
+            uint32_t importEventStart = 0u;
+            if (!n3dsWhtPxlFastDraw && runner->renderer != nullptr) {
+                importStart = N3DSRenderer_getFramePageImports(runner->renderer);
+                evictionStart = N3DSRenderer_getFramePageEvictions(runner->renderer);
+                importEventStart = N3DSRenderer_getFramePageImportEventCount(runner->renderer);
+            }
 #endif
             if (codeId >= 0) {
                 Runner_executeResolvedEvent(runner, inst, EVENT_DRAW, DRAW_NORMAL, codeId, ownerObjectIndex);
             } else if (runner->renderer != nullptr) {
 #ifdef __3DS__
-                if (!Runner_tryDraw3DSWhtPxlGravFast(runner, inst)) {
+                if (n3dsWhtPxlFastDraw) {
+                    (void) Runner_tryDraw3DSWhtPxlGravFast(runner, inst);
+                } else {
                     Renderer_drawSelf(runner->renderer, inst);
                 }
 #else
@@ -2205,7 +2224,9 @@ void Runner_draw(Runner* runner) {
             if (offsetTopBattleEnemy) {
                 inst->y = savedY;
             }
-            Runner_capture3DSAtlasImportAttribution(runner, inst, importStart, evictionStart, importEventStart, N3DS_ATLAS_IMPORT_PASS_MAIN);
+            if (!n3dsWhtPxlFastDraw) {
+                Runner_capture3DSAtlasImportAttribution(runner, inst, importStart, evictionStart, importEventStart, N3DS_ATLAS_IMPORT_PASS_MAIN);
+            }
 #endif
             runner->frameDrawInstances++;
             runner->frameDrawInstancesMs += Runner_nowMs() - drawStartMs;
@@ -4124,9 +4145,23 @@ void Runner_step(Runner* runner) {
 
         // Gravity: add velocity in gravity_direction (HTML5: AddTo_Speed)
         if (inst->gravity != 0.0f) {
-            GMLReal gravDirRad = inst->gravityDirection * (M_PI / 180.0);
-            inst->hspeed += (float) (inst->gravity * clampFloat(GMLReal_cos(gravDirRad)));
-            inst->vspeed -= (float) (inst->gravity * clampFloat(GMLReal_sin(gravDirRad)));
+#ifdef __3DS__
+            // UNDERTALE's obj_whtpxlgrav uses gravity_direction=90. Avoid the
+            // generic sin/cos pair for the hundreds of canonical dust pixels.
+            bool usedWhtPxlGravityFastPath =
+                runner->osType == OS_3DS &&
+                inst->gravityDirection == 90.0f &&
+                (Runner_get3DSObjectTraits(runner, inst->objectIndex) & N3DS_OBJ_TRAIT_WHTPXLGRAV) != 0;
+            if (usedWhtPxlGravityFastPath) {
+                inst->vspeed -= inst->gravity;
+            } else
+#endif
+            {
+                GMLReal gravDirRad = inst->gravityDirection * (M_PI / 180.0);
+                inst->hspeed += (float) (inst->gravity * clampFloat(GMLReal_cos(gravDirRad)));
+                inst->vspeed -= (float) (inst->gravity * clampFloat(GMLReal_sin(gravDirRad)));
+            }
+            // Preserve the public speed/direction state exactly as the generic path does.
             Instance_computeSpeedFromComponents(inst);
         }
 
