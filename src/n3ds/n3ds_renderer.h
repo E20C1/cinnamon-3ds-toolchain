@@ -4,6 +4,29 @@
 
 #define N3DS_ROOM_PREWARM_PAGE_DIAG_CAP 16u
 
+typedef enum {
+    N3DS_BATTLE_PREWARM_TARGET_NONE = 0,
+    N3DS_BATTLE_PREWARM_TARGET_NORMAL = 1,
+    N3DS_BATTLE_PREWARM_TARGET_QUICK = 2,
+    N3DS_BATTLE_PREWARM_TARGET_STORY = 3,
+    N3DS_BATTLE_PREWARM_TARGET_FLOWEY = 4,
+    N3DS_BATTLE_PREWARM_TARGET_UNKNOWN = 5,
+} N3DSBattlePrewarmTargetKind;
+
+typedef struct {
+    bool valid;
+    bool active;
+    N3DSBattlePrewarmTargetKind targetKind;
+    int32_t targetRoomIndex;
+    int32_t stageStart;
+    int32_t stageEnd;
+    int32_t assetStage;
+    uint32_t jobBytesCompleted;
+    uint32_t jobBytesTotal;
+    uint32_t chunksReadThisTick;
+    uint32_t bytesReadThisTick;
+} N3DSBattlePrewarmTickDiag;
+
 typedef struct {
     bool valid;
     bool battleRoom;
@@ -97,5 +120,6 @@ uint32_t N3DSRenderer_getFrameC2DFlushes(Renderer* renderer);
 int32_t N3DSRenderer_findTileEntryIndex(Renderer* renderer, int32_t backgroundIndex, int32_t srcX, int32_t srcY, int32_t srcW, int32_t srcH);
 bool N3DSRenderer_drawCachedTileEntry(Renderer* renderer, int32_t tileEntryIndex, float drawX, float drawY, float xscale, float yscale, uint32_t color, float alpha);
 bool N3DSRenderer_getLastRoomPrewarmPerf(Renderer* renderer, N3DSRoomPrewarmPerf* outPerf);
+bool N3DSRenderer_getLastBattlePrewarmTickDiag(Renderer* renderer, N3DSBattlePrewarmTickDiag* outDiag);
 bool N3DSRenderer_tickBattlePrewarm(Renderer* renderer, Runner* runner);
 void N3DSRenderer_drawDustRectFast(Renderer* renderer, float x, float y, float width, float height, uint32_t color, float alpha);

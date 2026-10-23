@@ -129,6 +129,15 @@ typedef struct {
     double battleReplayMs;
     double battlePrewarmTickMs;
     int32_t battleTransitionPrewarmActive;
+    uint32_t battlePrewarmTargetKind;
+    int32_t battlePrewarmTargetRoomIndex;
+    int32_t battlePrewarmStageStart;
+    int32_t battlePrewarmStageEnd;
+    int32_t battlePrewarmAssetStage;
+    uint32_t battlePrewarmJobBytesCompleted;
+    uint32_t battlePrewarmJobBytesTotal;
+    uint32_t battlePrewarmTickChunks;
+    uint32_t battlePrewarmTickBytes;
     double renderMs;
     double frameBeginMs;
     double rendererBeginMs;
@@ -923,6 +932,10 @@ static N3DSDustPerfFrame N3DSDustPerf_captureFrame(
     sample.mnFight = -1;
     sample.roomFromIndex = -1;
     sample.roomToIndex = -1;
+    sample.battlePrewarmTargetRoomIndex = -1;
+    sample.battlePrewarmStageStart = -1;
+    sample.battlePrewarmStageEnd = -1;
+    sample.battlePrewarmAssetStage = -1;
     sample.dustCount = Runner_get3DSObjectInstanceCountByName(runner, "obj_whtpxlgrav");
     if (runner != NULL) {
         sample.instancesCreated = runner->frameInstancesCreated;
@@ -939,6 +952,18 @@ static N3DSDustPerfFrame N3DSDustPerf_captureFrame(
         sample.battleReplayMs = runner->frameDrawBattleReplayMs;
         sample.battlePrewarmTickMs = battlePrewarmTickMs;
         sample.battleTransitionPrewarmActive = battleTransitionPrewarmActive ? 1 : 0;
+        N3DSBattlePrewarmTickDiag prewarmTickDiag;
+        if (N3DSRenderer_getLastBattlePrewarmTickDiag(renderer, &prewarmTickDiag)) {
+            sample.battlePrewarmTargetKind = (uint32_t) prewarmTickDiag.targetKind;
+            sample.battlePrewarmTargetRoomIndex = prewarmTickDiag.targetRoomIndex;
+            sample.battlePrewarmStageStart = prewarmTickDiag.stageStart;
+            sample.battlePrewarmStageEnd = prewarmTickDiag.stageEnd;
+            sample.battlePrewarmAssetStage = prewarmTickDiag.assetStage;
+            sample.battlePrewarmJobBytesCompleted = prewarmTickDiag.jobBytesCompleted;
+            sample.battlePrewarmJobBytesTotal = prewarmTickDiag.jobBytesTotal;
+            sample.battlePrewarmTickChunks = prewarmTickDiag.chunksReadThisTick;
+            sample.battlePrewarmTickBytes = prewarmTickDiag.bytesReadThisTick;
+        }
         if (renderPerf != NULL) {
             sample.renderMs = renderPerf->totalMs;
             sample.frameBeginMs = renderPerf->frameBeginMs;
@@ -1142,6 +1167,30 @@ static const char* N3DSPerf_directLoadKindName(uint32_t kind) {
     }
 }
 
+static const char* N3DSPerf_battlePrewarmTargetName(uint32_t kind) {
+    switch ((N3DSBattlePrewarmTargetKind) kind) {
+        case N3DS_BATTLE_PREWARM_TARGET_NORMAL: return "normal";
+        case N3DS_BATTLE_PREWARM_TARGET_QUICK: return "quick";
+        case N3DS_BATTLE_PREWARM_TARGET_STORY: return "story";
+        case N3DS_BATTLE_PREWARM_TARGET_FLOWEY: return "flowey";
+        case N3DS_BATTLE_PREWARM_TARGET_UNKNOWN: return "unknown";
+        default: return "";
+    }
+}
+
+static const char* N3DSPerf_battlePrewarmAssetName(int32_t stage) {
+    switch (stage) {
+        case 0: return "spr_targetchoice";
+        case 1: return "spr_target";
+        case 2: return "spr_strike";
+        case 3: return "fnt_ja_curs";
+        case 4: return "fnt_ja_main";
+        case 5: return "fnt_ja_plain";
+        case 6: return "manifest";
+        default: return "";
+    }
+}
+
 static void N3DSPerf_formatPageList(char* out, size_t outSize, const uint16_t* pages, uint32_t pageCount) {
     if (out == NULL || outSize == 0) return;
     out[0] = '\0';
@@ -1199,7 +1248,7 @@ static void N3DSPerf_writeEventToFile(
         "atlas_instance_sprite,atlas_instance_sprite_name,atlas_instance_subimg,atlas_instance_tpag,"
         "atlas_trigger_tpag,atlas_trigger_sprite,atlas_trigger_sprite_name,atlas_trigger_frame,"
         "atlas_imports,atlas_evictions,atlas_pass,atlas_pages,atlas_page_info,target_object,target_name,target_instance,target_sprite,"
-        "target_subimg,target_tpag,target_image_index,target_image_speed,battle_active,myfight,mnfight,battle_transition_prewarm_active,"
+        "target_subimg,target_tpag,target_image_index,target_image_speed,battle_active,myfight,mnfight,battle_transition_prewarm_active,battle_prewarm_target,battle_prewarm_target_room,battle_prewarm_stage_start,battle_prewarm_stage_end,battle_prewarm_asset,battle_prewarm_job_bytes,battle_prewarm_job_total,battle_prewarm_tick_chunks,battle_prewarm_tick_bytes,"
         "top_step_object,top_step_name,top_step_ms,top_step_calls,"
         "room_transitioned,room_from,room_to,room_transition_ms,room_init_ms,room_start_ms,renderer_prewarm_ms,audio_prewarm_ms,"
         "prewarm_battle_room,prewarm_total_ms,prewarm_clear_pins_ms,prewarm_flush_direct_ms,"
@@ -1374,6 +1423,16 @@ static void N3DSPerf_writeEventToFile(
             (double) sample->targetChoiceImageSpeed, (long) sample->battleActive,
             (long) sample->myFight, (long) sample->mnFight,
             (long) sample->battleTransitionPrewarmActive);
+        fprintf(file, ",%s,%ld,%ld,%ld,%s,%lu,%lu,%lu,%lu",
+            N3DSPerf_battlePrewarmTargetName(sample->battlePrewarmTargetKind),
+            (long) sample->battlePrewarmTargetRoomIndex,
+            (long) sample->battlePrewarmStageStart,
+            (long) sample->battlePrewarmStageEnd,
+            N3DSPerf_battlePrewarmAssetName(sample->battlePrewarmAssetStage),
+            (unsigned long) sample->battlePrewarmJobBytesCompleted,
+            (unsigned long) sample->battlePrewarmJobBytesTotal,
+            (unsigned long) sample->battlePrewarmTickChunks,
+            (unsigned long) sample->battlePrewarmTickBytes);
         fprintf(file, ",%ld,%s,%.3f,%lu",
             (long) sample->topStepObjectIndex, topName,
             sample->topStepObjectMs, (unsigned long) sample->topStepObjectCalls);

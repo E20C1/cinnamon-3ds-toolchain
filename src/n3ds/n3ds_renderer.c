@@ -281,6 +281,14 @@ typedef struct {
     bool active;
 } N3DSDirectPrefetchJob;
 
+typedef struct {
+    u64 startTick;
+    uint32_t chunksRead;
+    uint32_t bytesRead;
+    uint32_t lastBytesCompleted;
+    uint32_t lastBytesTotal;
+} N3DSDirectPrefetchTickBudget;
+
 typedef enum {
     N3DS_DIRECT_PREFETCH_PENDING = 0,
     N3DS_DIRECT_PREFETCH_COMPLETE = 1,
@@ -412,12 +420,17 @@ typedef struct N3DSRenderer {
     uint32_t battleTransitionPrewarmStage;
     uint32_t battleTransitionManifestOffset;
     int32_t battleTransitionRoomIndex;
+    N3DSBattlePrewarmTargetKind battleTransitionTargetKind;
     int32_t battleControllerObjectIndex;
     int32_t battleBlconObjectIndex;
     int32_t battlerObjectIndex;
+    int32_t battlerQuickObjectIndex;
+    int32_t battlerStoryObjectIndex;
+    int32_t battlerFloweyObjectIndex;
     int32_t battleWriterObjectIndex;
     bool battleTransitionPrewarmSeen;
     N3DSDirectPrefetchJob battleDirectPrefetch;
+    N3DSBattlePrewarmTickDiag lastBattlePrewarmTickDiag;
     bool battleTransitionManifestLoaded;
     bool battleTransitionManifestAttempted;
     bool battleTransitionManifestFound;
@@ -2021,16 +2034,33 @@ static bool N3DSRenderer_beginPackedDirectPrefetch(N3DSRenderer* renderer, N3DSD
     return true;
 }
 
-static N3DSDirectPrefetchStatus N3DSRenderer_tickDirectPrefetchJob(N3DSRenderer* renderer, bool drain) {
+static bool N3DSRenderer_directPrefetchBudgetExhausted(const N3DSDirectPrefetchTickBudget* budget) {
+    if (budget == NULL) return false;
+    if (budget->chunksRead >= N3DS_BATTLE_DIRECT_PREFETCH_MAX_CHUNKS_PER_TICK) return true;
+    return N3DSRenderer_ticksToMs(svcGetSystemTick() - budget->startTick) >= N3DS_BATTLE_DIRECT_PREFETCH_BUDGET_MS;
+}
+
+static N3DSDirectPrefetchStatus N3DSRenderer_tickDirectPrefetchJob(
+    N3DSRenderer* renderer,
+    bool drain,
+    N3DSDirectPrefetchTickBudget* budget
+) {
     if (renderer == NULL || !renderer->battleDirectPrefetch.active) return N3DS_DIRECT_PREFETCH_COMPLETE;
 
+    N3DSDirectPrefetchTickBudget localBudget;
+    if (!drain && budget == NULL) {
+        memset(&localBudget, 0, sizeof(localBudget));
+        localBudget.startTick = svcGetSystemTick();
+        budget = &localBudget;
+    }
+
     N3DSDirectPrefetchJob* job = &renderer->battleDirectPrefetch;
-    u64 startTick = svcGetSystemTick();
-    uint32_t chunksRead = 0;
     while (job->active) {
         if (job->bytesRead >= job->dataSize) {
             return N3DSRenderer_publishDirectPrefetchJob(renderer) ? N3DS_DIRECT_PREFETCH_COMPLETE : N3DS_DIRECT_PREFETCH_FAILED;
         }
+        if (!drain && N3DSRenderer_directPrefetchBudgetExhausted(budget)) return N3DS_DIRECT_PREFETCH_PENDING;
+
         uint32_t remaining = job->dataSize - job->bytesRead;
         uint32_t chunkSize = remaining < N3DS_BATTLE_DIRECT_PREFETCH_CHUNK_BYTES ? remaining : N3DS_BATTLE_DIRECT_PREFETCH_CHUNK_BYTES;
         uint64_t absoluteOffset = (uint64_t) job->dataOffset + (uint64_t) job->bytesRead;
@@ -2045,16 +2075,20 @@ static N3DSDirectPrefetchStatus N3DSRenderer_tickDirectPrefetchJob(N3DSRenderer*
             N3DSRenderer_cancelDirectPrefetchJob(renderer);
             return N3DS_DIRECT_PREFETCH_FAILED;
         }
+
         job->bytesRead += chunkSize;
         renderer->totalDirectBlobReadBytes += (uint64_t) chunkSize;
-        chunksRead++;
+        if (budget != NULL) {
+            budget->chunksRead++;
+            budget->bytesRead += chunkSize;
+            budget->lastBytesCompleted = job->bytesRead;
+            budget->lastBytesTotal = job->dataSize;
+        }
+
         if (job->bytesRead == job->dataSize) {
             return N3DSRenderer_publishDirectPrefetchJob(renderer) ? N3DS_DIRECT_PREFETCH_COMPLETE : N3DS_DIRECT_PREFETCH_FAILED;
         }
-        if (!drain) {
-            if (chunksRead >= N3DS_BATTLE_DIRECT_PREFETCH_MAX_CHUNKS_PER_TICK) return N3DS_DIRECT_PREFETCH_PENDING;
-            if (N3DSRenderer_ticksToMs(svcGetSystemTick() - startTick) >= N3DS_BATTLE_DIRECT_PREFETCH_BUDGET_MS) return N3DS_DIRECT_PREFETCH_PENDING;
-        }
+        if (!drain && N3DSRenderer_directPrefetchBudgetExhausted(budget)) return N3DS_DIRECT_PREFETCH_PENDING;
     }
     return N3DS_DIRECT_PREFETCH_COMPLETE;
 }
@@ -2067,7 +2101,7 @@ static bool N3DSRenderer_ensureDirectTextureBlobLoaded(N3DSRenderer* renderer, N
         return true;
     }
     if (renderer->battleDirectPrefetch.active && renderer->battleDirectPrefetch.asset == asset) {
-        N3DSDirectPrefetchStatus status = N3DSRenderer_tickDirectPrefetchJob(renderer, true);
+        N3DSDirectPrefetchStatus status = N3DSRenderer_tickDirectPrefetchJob(renderer, true, NULL);
         if (status == N3DS_DIRECT_PREFETCH_COMPLETE && asset->blobData != NULL && asset->blobSize > 0) return true;
     }
 
@@ -3771,10 +3805,37 @@ static bool N3DSRenderer_isJapaneseLanguage(Runner* runner) {
     return value.type == RVALUE_STRING && value.string != NULL && strcmp(value.string, "ja") == 0;
 }
 
-static bool N3DSRenderer_isUndertaleBattleTransition(N3DSRenderer* renderer, Runner* runner) {
-    if (renderer == NULL || runner == NULL) return false;
-    return N3DSRenderer_hasLiveExactObject(runner, renderer->battleBlconObjectIndex) ||
-        N3DSRenderer_hasLiveObjectOrDescendant(runner, renderer->battlerObjectIndex);
+static N3DSBattlePrewarmTargetKind N3DSRenderer_getUndertaleBattleTransitionTargetKind(
+    N3DSRenderer* renderer,
+    Runner* runner
+) {
+    if (renderer == NULL || runner == NULL) return N3DS_BATTLE_PREWARM_TARGET_NONE;
+    if (N3DSRenderer_hasLiveExactObject(runner, renderer->battlerQuickObjectIndex)) return N3DS_BATTLE_PREWARM_TARGET_QUICK;
+    if (N3DSRenderer_hasLiveExactObject(runner, renderer->battlerStoryObjectIndex)) return N3DS_BATTLE_PREWARM_TARGET_STORY;
+    if (N3DSRenderer_hasLiveExactObject(runner, renderer->battlerFloweyObjectIndex)) return N3DS_BATTLE_PREWARM_TARGET_FLOWEY;
+    if (N3DSRenderer_hasLiveExactObject(runner, renderer->battlerObjectIndex)) return N3DS_BATTLE_PREWARM_TARGET_NORMAL;
+    if (N3DSRenderer_hasLiveExactObject(runner, renderer->battleBlconObjectIndex) ||
+        N3DSRenderer_hasLiveObjectOrDescendant(runner, renderer->battlerObjectIndex)) return N3DS_BATTLE_PREWARM_TARGET_UNKNOWN;
+    return N3DS_BATTLE_PREWARM_TARGET_NONE;
+}
+
+static int32_t N3DSRenderer_findBattleTransitionTargetRoomIndex(
+    N3DSRenderer* renderer,
+    N3DSBattlePrewarmTargetKind targetKind
+) {
+    if (renderer == NULL || renderer->base.dataWin == NULL) return -1;
+    switch (targetKind) {
+        case N3DS_BATTLE_PREWARM_TARGET_NORMAL:
+            return N3DSRenderer_findRoomIndexByName(renderer->base.dataWin, "room_battle");
+        case N3DS_BATTLE_PREWARM_TARGET_QUICK:
+            return N3DSRenderer_findRoomIndexByName(renderer->base.dataWin, "room_fastbattle");
+        case N3DS_BATTLE_PREWARM_TARGET_STORY:
+            return N3DSRenderer_findRoomIndexByName(renderer->base.dataWin, "room_storybattle");
+        case N3DS_BATTLE_PREWARM_TARGET_FLOWEY:
+            return -1;
+        default:
+            return -1;
+    }
 }
 
 static bool N3DSRenderer_prewarmDirectFontBlobByIndex(N3DSRenderer* renderer, int32_t fontIndex) {
@@ -3799,7 +3860,12 @@ static bool N3DSRenderer_prewarmDirectFontBlobByName(N3DSRenderer* renderer, con
     return N3DSRenderer_prewarmDirectFontBlobByIndex(renderer, N3DSRenderer_findFontIndexByName(renderer->base.dataWin, wantedName));
 }
 
-static bool N3DSRenderer_tickDirectTextureBlobPrefetch(N3DSRenderer* renderer, N3DSDirectTextureAsset* asset, const char* relativePath) {
+static bool N3DSRenderer_tickDirectTextureBlobPrefetch(
+    N3DSRenderer* renderer,
+    N3DSDirectTextureAsset* asset,
+    const char* relativePath,
+    N3DSDirectPrefetchTickBudget* budget
+) {
     if (renderer == NULL || asset == NULL || relativePath == NULL) return true;
     if (asset->blobData != NULL && asset->blobSize > 0) {
         asset->blobLastUsedStamp = ++renderer->directBlobUseCounter;
@@ -3812,7 +3878,7 @@ static bool N3DSRenderer_tickDirectTextureBlobPrefetch(N3DSRenderer* renderer, N
         }
     } else if (renderer->battleDirectPrefetch.asset != asset) return false;
 
-    N3DSDirectPrefetchStatus status = N3DSRenderer_tickDirectPrefetchJob(renderer, false);
+    N3DSDirectPrefetchStatus status = N3DSRenderer_tickDirectPrefetchJob(renderer, false, budget);
     if (status == N3DS_DIRECT_PREFETCH_FAILED) {
         (void) N3DSRenderer_ensureDirectTextureBlobLoaded(renderer, asset, relativePath);
         return true;
@@ -3848,9 +3914,13 @@ static void N3DSRenderer_prewarmBattleDirectSpriteBlobByName(N3DSRenderer* rende
 #endif
 }
 
-static bool N3DSRenderer_tickBattleDirectSpriteBlobByName(N3DSRenderer* renderer, const char* wantedName) {
+static bool N3DSRenderer_tickBattleDirectSpriteBlobByName(
+    N3DSRenderer* renderer,
+    const char* wantedName,
+    N3DSDirectPrefetchTickBudget* budget
+) {
 #if !N3DS_ENABLE_DIRECT_ASSETS
-    (void) renderer; (void) wantedName; return true;
+    (void) renderer; (void) wantedName; (void) budget; return true;
 #else
     if (renderer == NULL || renderer->base.dataWin == NULL || wantedName == NULL) return true;
     DataWin* dw = renderer->base.dataWin;
@@ -3858,13 +3928,17 @@ static bool N3DSRenderer_tickBattleDirectSpriteBlobByName(N3DSRenderer* renderer
     if (spriteIndex < 0 || (uint32_t) spriteIndex >= renderer->directSpriteAssetCount) return true;
     char path[256];
     snprintf(path, sizeof(path), "sprites/spr_%05lu.t3x", (unsigned long) spriteIndex);
-    return N3DSRenderer_tickDirectTextureBlobPrefetch(renderer, &renderer->directSpriteAssets[spriteIndex].sheetAsset, path);
+    return N3DSRenderer_tickDirectTextureBlobPrefetch(renderer, &renderer->directSpriteAssets[spriteIndex].sheetAsset, path, budget);
 #endif
 }
 
-static bool N3DSRenderer_tickBattleDirectFontBlobByName(N3DSRenderer* renderer, const char* wantedName) {
+static bool N3DSRenderer_tickBattleDirectFontBlobByName(
+    N3DSRenderer* renderer,
+    const char* wantedName,
+    N3DSDirectPrefetchTickBudget* budget
+) {
 #if !N3DS_ENABLE_DIRECT_ASSETS
-    (void) renderer; (void) wantedName; return true;
+    (void) renderer; (void) wantedName; (void) budget; return true;
 #else
     if (renderer == NULL || renderer->base.dataWin == NULL || wantedName == NULL) return true;
     int32_t fontIndex = N3DSRenderer_findFontIndexByName(renderer->base.dataWin, wantedName);
@@ -3873,7 +3947,7 @@ static bool N3DSRenderer_tickBattleDirectFontBlobByName(N3DSRenderer* renderer, 
     if (!N3DSRenderer_shouldUseDirectFontAsset(font)) return true;
     char path[256];
     snprintf(path, sizeof(path), "fonts/font_%05d.t3x", (int) fontIndex);
-    return N3DSRenderer_tickDirectTextureBlobPrefetch(renderer, &renderer->directFontAssets[fontIndex], path);
+    return N3DSRenderer_tickDirectTextureBlobPrefetch(renderer, &renderer->directFontAssets[fontIndex], path, budget);
 #endif
 }
 
@@ -3976,13 +4050,11 @@ static void N3DSRenderer_resetBattleTransitionManifestDiag(N3DSRenderer* rendere
 
 static bool N3DSRenderer_prewarmBattleRoomManifestNextBlob(N3DSRenderer* renderer) {
     if (renderer == NULL || renderer->base.dataWin == NULL) return false;
-    renderer->battleTransitionManifestAttempted = true;
     renderer->battleTransitionManifestLoaded = renderer->roomManifestEntries != NULL;
     if (renderer->roomManifestEntries == NULL) return false;
-    if (renderer->battleTransitionRoomIndex < 0) {
-        renderer->battleTransitionRoomIndex = N3DSRenderer_findRoomIndexByName(renderer->base.dataWin, "room_battle");
-    }
     if (renderer->battleTransitionRoomIndex < 0) return false;
+
+    renderer->battleTransitionManifestAttempted = true;
     const N3DSRoomManifestEntry* entry = N3DSRenderer_findRoomManifestEntry(renderer, (uint32_t) renderer->battleTransitionRoomIndex);
     if (entry == NULL) return false;
     renderer->battleTransitionManifestFound = true;
@@ -4180,23 +4252,55 @@ static void N3DSRenderer_capturePrewarmReadPages(N3DSRenderer* renderer, uint32_
     if (outTruncated != NULL && phaseReadCount > *outCount) *outTruncated = true;
 }
 
+static void N3DSRenderer_resetBattlePrewarmTickDiag(N3DSRenderer* renderer) {
+    if (renderer == NULL) return;
+    memset(&renderer->lastBattlePrewarmTickDiag, 0, sizeof(renderer->lastBattlePrewarmTickDiag));
+    renderer->lastBattlePrewarmTickDiag.targetRoomIndex = -1;
+    renderer->lastBattlePrewarmTickDiag.stageStart = -1;
+    renderer->lastBattlePrewarmTickDiag.stageEnd = -1;
+    renderer->lastBattlePrewarmTickDiag.assetStage = -1;
+}
+
+static int32_t N3DSRenderer_battlePrewarmDiagStage(uint32_t stage) {
+    return stage == UINT32_MAX || stage > (uint32_t) INT32_MAX ? -1 : (int32_t) stage;
+}
+
+static void N3DSRenderer_captureBattlePrewarmTransitionEndDiag(N3DSRenderer* renderer) {
+    if (renderer == NULL || !renderer->battleTransitionPrewarmSeen) return;
+    N3DSBattlePrewarmTickDiag* diag = &renderer->lastBattlePrewarmTickDiag;
+    diag->valid = true;
+    diag->active = false;
+    diag->targetKind = renderer->battleTransitionTargetKind;
+    diag->targetRoomIndex = renderer->battleTransitionRoomIndex;
+    diag->stageStart = N3DSRenderer_battlePrewarmDiagStage(renderer->battleTransitionPrewarmStage);
+    diag->stageEnd = diag->stageStart;
+    if (renderer->battleDirectPrefetch.active) {
+        diag->jobBytesCompleted = renderer->battleDirectPrefetch.bytesRead;
+        diag->jobBytesTotal = renderer->battleDirectPrefetch.dataSize;
+    }
+}
+
 bool N3DSRenderer_tickBattlePrewarm(Renderer* base, Runner* runner) {
     if (base == NULL || runner == NULL || runner->currentRoom == NULL) return false;
     N3DSRenderer* renderer = (N3DSRenderer*) base;
+    N3DSRenderer_resetBattlePrewarmTickDiag(renderer);
 
     if (N3DSRenderer_isUndertaleBattleRoom(renderer, runner)) {
-        // Room prewarm should have consumed any target job. Drop any unexpected
-        // leftover staging buffer rather than carrying reserved RAM through battle.
+        if (runner->frameRoomTransitioned) N3DSRenderer_captureBattlePrewarmTransitionEndDiag(renderer);
         N3DSRenderer_cancelDirectPrefetchJob(renderer);
         N3DSRenderer_prewarmLiveJapaneseDirectFontBlobs(renderer, runner);
         return false;
     }
 
-    if (!N3DSRenderer_isUndertaleBattleTransition(renderer, runner)) {
+    N3DSBattlePrewarmTargetKind targetKind = N3DSRenderer_getUndertaleBattleTransitionTargetKind(renderer, runner);
+    if (targetKind == N3DS_BATTLE_PREWARM_TARGET_NONE) {
+        if (runner->frameRoomTransitioned) N3DSRenderer_captureBattlePrewarmTransitionEndDiag(renderer);
         N3DSRenderer_cancelDirectPrefetchJob(renderer);
         renderer->battleTransitionPrewarmSeen = false;
         renderer->battleTransitionPrewarmStage = 0;
         renderer->battleTransitionManifestOffset = 0;
+        renderer->battleTransitionTargetKind = N3DS_BATTLE_PREWARM_TARGET_NONE;
+        renderer->battleTransitionRoomIndex = -1;
         N3DSRenderer_resetBattleTransitionManifestDiag(renderer);
         return false;
     }
@@ -4206,35 +4310,75 @@ bool N3DSRenderer_tickBattlePrewarm(Renderer* base, Runner* runner) {
         renderer->battleTransitionPrewarmSeen = true;
         renderer->battleTransitionPrewarmStage = 0;
         renderer->battleTransitionManifestOffset = 0;
+        renderer->battleTransitionTargetKind = targetKind;
+        renderer->battleTransitionRoomIndex = N3DSRenderer_findBattleTransitionTargetRoomIndex(renderer, targetKind);
+        N3DSRenderer_resetBattleTransitionManifestDiag(renderer);
+    } else if (renderer->battleTransitionTargetKind != targetKind) {
+        renderer->battleTransitionTargetKind = targetKind;
+        renderer->battleTransitionRoomIndex = N3DSRenderer_findBattleTransitionTargetRoomIndex(renderer, targetKind);
+        renderer->battleTransitionManifestOffset = 0;
         N3DSRenderer_resetBattleTransitionManifestDiag(renderer);
     }
 
-    if (renderer->battleTransitionPrewarmStage == UINT32_MAX) return true;
+    N3DSBattlePrewarmTickDiag* diag = &renderer->lastBattlePrewarmTickDiag;
+    diag->valid = true;
+    diag->active = true;
+    diag->targetKind = renderer->battleTransitionTargetKind;
+    diag->targetRoomIndex = renderer->battleTransitionRoomIndex;
+    diag->stageStart = N3DSRenderer_battlePrewarmDiagStage(renderer->battleTransitionPrewarmStage);
 
-    const uint32_t spriteStageCount = (uint32_t) (sizeof(kN3DSBattleDirectSpriteNames) / sizeof(kN3DSBattleDirectSpriteNames[0]));
-    const uint32_t fontStageCount = (uint32_t) (sizeof(kN3DSBattleJapaneseCommonFontNames) / sizeof(kN3DSBattleJapaneseCommonFontNames[0]));
-
-    if (renderer->battleTransitionPrewarmStage < spriteStageCount) {
-        if (N3DSRenderer_tickBattleDirectSpriteBlobByName(renderer, kN3DSBattleDirectSpriteNames[renderer->battleTransitionPrewarmStage])) {
-            renderer->battleTransitionPrewarmStage++;
-        }
+    if (renderer->battleTransitionPrewarmStage == UINT32_MAX) {
+        diag->stageEnd = -1;
         return true;
     }
 
-    if (renderer->battleTransitionPrewarmStage < spriteStageCount + fontStageCount) {
-        if (!N3DSRenderer_isJapaneseLanguage(runner)) {
-            renderer->battleTransitionPrewarmStage = spriteStageCount + fontStageCount;
+    const uint32_t spriteStageCount = (uint32_t) (sizeof(kN3DSBattleDirectSpriteNames) / sizeof(kN3DSBattleDirectSpriteNames[0]));
+    const uint32_t fontStageCount = (uint32_t) (sizeof(kN3DSBattleJapaneseCommonFontNames) / sizeof(kN3DSBattleJapaneseCommonFontNames[0]));
+    const uint32_t directStageCount = spriteStageCount + fontStageCount;
+
+    N3DSDirectPrefetchTickBudget budget;
+    memset(&budget, 0, sizeof(budget));
+    budget.startTick = svcGetSystemTick();
+    uint64_t directBytesBefore = renderer->totalDirectBlobReadBytes;
+
+    while (renderer->battleTransitionPrewarmStage < directStageCount) {
+        if (N3DSRenderer_directPrefetchBudgetExhausted(&budget)) break;
+        uint32_t stage = renderer->battleTransitionPrewarmStage;
+        diag->assetStage = (int32_t) stage;
+        bool complete = false;
+        if (stage < spriteStageCount) {
+            complete = N3DSRenderer_tickBattleDirectSpriteBlobByName(renderer, kN3DSBattleDirectSpriteNames[stage], &budget);
+        } else if (!N3DSRenderer_isJapaneseLanguage(runner)) {
+            renderer->battleTransitionPrewarmStage = directStageCount;
+            break;
         } else {
-            uint32_t fontStage = renderer->battleTransitionPrewarmStage - spriteStageCount;
-            if (N3DSRenderer_tickBattleDirectFontBlobByName(renderer, kN3DSBattleJapaneseCommonFontNames[fontStage])) {
-                renderer->battleTransitionPrewarmStage++;
-            }
-            return true;
+            uint32_t fontStage = stage - spriteStageCount;
+            complete = N3DSRenderer_tickBattleDirectFontBlobByName(renderer, kN3DSBattleJapaneseCommonFontNames[fontStage], &budget);
         }
+        if (!complete) break;
+        renderer->battleTransitionPrewarmStage++;
     }
 
+    uint64_t directByteDelta = renderer->totalDirectBlobReadBytes - directBytesBefore;
+    diag->chunksReadThisTick = budget.chunksRead;
+    diag->bytesReadThisTick = directByteDelta > UINT32_MAX ? UINT32_MAX : (uint32_t) directByteDelta;
+    if (renderer->battleDirectPrefetch.active) {
+        diag->jobBytesCompleted = renderer->battleDirectPrefetch.bytesRead;
+        diag->jobBytesTotal = renderer->battleDirectPrefetch.dataSize;
+    } else if (budget.lastBytesTotal > 0) {
+        diag->jobBytesCompleted = budget.lastBytesCompleted;
+        diag->jobBytesTotal = budget.lastBytesTotal;
+    }
+    diag->stageEnd = N3DSRenderer_battlePrewarmDiagStage(renderer->battleTransitionPrewarmStage);
+
+    if (renderer->battleTransitionPrewarmStage < directStageCount) return true;
+    if (diag->bytesReadThisTick > 0) return true;
+
+    diag->assetStage = (int32_t) directStageCount;
+    if (renderer->battleTransitionRoomIndex < 0) return true;
     if (!N3DSRenderer_prewarmBattleRoomManifestNextBlob(renderer)) {
         renderer->battleTransitionPrewarmStage = UINT32_MAX;
+        diag->stageEnd = -1;
     }
     return true;
 }
@@ -4254,7 +4398,11 @@ static void N3DSRenderer_prewarmRoom(Renderer* base, Runner* runner) {
     perf.atlasCacheBytesBefore = renderer->cachedT3xBytes;
     perf.directCacheBytesBefore = renderer->cachedDirectT3xBytes;
     perf.directVRAMBytesBefore = renderer->residentDirectAssetVRAMBytes;
-    if (battleRoom) {
+    bool transitionTargetRoom =
+        renderer->battleTransitionPrewarmSeen &&
+        renderer->battleTransitionRoomIndex >= 0 &&
+        renderer->battleTransitionRoomIndex == runner->currentRoomIndex;
+    if (battleRoom || transitionTargetRoom) {
         perf.battleManifestLoaded = renderer->battleTransitionManifestLoaded;
         perf.battleManifestAttempted = renderer->battleTransitionManifestAttempted;
         perf.battleManifestFound = renderer->battleTransitionManifestFound;
@@ -4343,9 +4491,14 @@ static void N3DSRenderer_init(Renderer* base, DataWin* dataWin) {
     base->dataWin = dataWin;
     renderer->baseTPAGCount = dataWin != NULL ? dataWin->tpag.count : 0u;
     renderer->battleTransitionRoomIndex = -1;
+    renderer->battleTransitionTargetKind = N3DS_BATTLE_PREWARM_TARGET_NONE;
+    N3DSRenderer_resetBattlePrewarmTickDiag(renderer);
     renderer->battleControllerObjectIndex = N3DSRenderer_findObjectIndexByName(dataWin, "obj_battlecontroller");
     renderer->battleBlconObjectIndex = N3DSRenderer_findObjectIndexByName(dataWin, "obj_battleblcon");
     renderer->battlerObjectIndex = N3DSRenderer_findObjectIndexByName(dataWin, "obj_battler");
+    renderer->battlerQuickObjectIndex = N3DSRenderer_findObjectIndexByName(dataWin, "obj_battlerquick");
+    renderer->battlerStoryObjectIndex = N3DSRenderer_findObjectIndexByName(dataWin, "obj_battlerstory");
+    renderer->battlerFloweyObjectIndex = N3DSRenderer_findObjectIndexByName(dataWin, "obj_battlerflowey");
     renderer->battleWriterObjectIndex = N3DSRenderer_findObjectIndexByName(dataWin, "obj_base_writer");
     renderer->topTarget = C2D_CreateScreenTarget(GFX_TOP, GFX_LEFT);
 #ifndef N3DS_DISABLE_BOTTOM_SCREEN
@@ -6549,6 +6702,18 @@ bool N3DSRenderer_getLastRoomPrewarmPerf(Renderer* base, N3DSRoomPrewarmPerf* ou
     if (base == NULL) return false;
     *outPerf = ((N3DSRenderer*) base)->lastRoomPrewarmPerf;
     return outPerf->valid;
+}
+
+bool N3DSRenderer_getLastBattlePrewarmTickDiag(Renderer* base, N3DSBattlePrewarmTickDiag* outDiag) {
+    if (outDiag == NULL) return false;
+    memset(outDiag, 0, sizeof(*outDiag));
+    outDiag->targetRoomIndex = -1;
+    outDiag->stageStart = -1;
+    outDiag->stageEnd = -1;
+    outDiag->assetStage = -1;
+    if (base == NULL) return false;
+    *outDiag = ((N3DSRenderer*) base)->lastBattlePrewarmTickDiag;
+    return outDiag->valid;
 }
 
 uint32_t N3DSRenderer_getFrameBlobReadEventCount(Renderer* base) {
