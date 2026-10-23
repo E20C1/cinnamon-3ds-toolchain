@@ -4344,7 +4344,7 @@ bool N3DSRenderer_tickBattlePrewarm(Renderer* base, Runner* runner) {
     while (renderer->battleTransitionPrewarmStage < directStageCount) {
         if (N3DSRenderer_directPrefetchBudgetExhausted(&budget)) break;
         uint32_t stage = renderer->battleTransitionPrewarmStage;
-        diag->assetStage = (int32_t) stage;
+        uint64_t stageBytesBefore = renderer->totalDirectBlobReadBytes;
         bool complete = false;
         if (stage < spriteStageCount) {
             complete = N3DSRenderer_tickBattleDirectSpriteBlobByName(renderer, kN3DSBattleDirectSpriteNames[stage], &budget);
@@ -4354,6 +4354,9 @@ bool N3DSRenderer_tickBattlePrewarm(Renderer* base, Runner* runner) {
         } else {
             uint32_t fontStage = stage - spriteStageCount;
             complete = N3DSRenderer_tickBattleDirectFontBlobByName(renderer, kN3DSBattleJapaneseCommonFontNames[fontStage], &budget);
+        }
+        if (renderer->totalDirectBlobReadBytes != stageBytesBefore) {
+            diag->assetStage = (int32_t) stage;
         }
         if (!complete) break;
         renderer->battleTransitionPrewarmStage++;
