@@ -1,4 +1,5 @@
 #include "n3ds_renderer.h"
+#include "n3ds_audio_system.h"
 #include "n3ds_platform_config.h"
 
 #include "../runner.h"
@@ -274,16 +275,21 @@ typedef struct {
 
 typedef struct {
     N3DSDirectTextureAsset* asset;
+    AudioSystem* audioSystem;
     uint8_t* data;
     uint32_t dataOffset;
     uint32_t dataSize;
     uint32_t bytesRead;
+    uint32_t workerChunksRead;
+    uint32_t workerRequestId;
     bool active;
+    bool workerBacked;
 } N3DSDirectPrefetchJob;
 
 typedef struct {
     u64 startTick;
     uint32_t chunksRead;
+    uint32_t blockingChunksRead;
     uint32_t bytesRead;
     uint32_t lastBytesCompleted;
     uint32_t lastBytesTotal;
@@ -448,6 +454,7 @@ typedef struct N3DSRenderer {
     FILE* atlasTraceFile;
     FILE* packedAtlasFile;
     FILE* packedDirectAssetFile;
+    char packedDirectAssetPath[512];
     uint32_t roomManifestEntryCount;
     uint32_t roomManifestPageRefCount;
     uint32_t roomManifestRoomCount;
@@ -1388,6 +1395,7 @@ static bool N3DSRenderer_loadPackedDirectAssets(N3DSRenderer* renderer) {
     }
 
     renderer->packedDirectAssetFile = file;
+    snprintf(renderer->packedDirectAssetPath, sizeof(renderer->packedDirectAssetPath), "%s", resolvedPath);
     fprintf(stderr, "N3DS: loaded packed direct texture blob (%u entries)\n", (unsigned int) entryCount);
     return true;
 }
@@ -1968,9 +1976,38 @@ static bool N3DSRenderer_evictLRUDirectAssetBlob(N3DSRenderer* renderer, const N
     return true;
 }
 
+static void N3DSRenderer_accountWorkerDirectPrefetchProgress(
+    N3DSRenderer* renderer,
+    N3DSDirectPrefetchJob* job,
+    const N3DSAudioWorkerReadStatus* status,
+    N3DSDirectPrefetchTickBudget* budget
+) {
+    if (renderer == NULL || job == NULL || status == NULL) return;
+    uint32_t byteDelta = status->bytesRead >= job->bytesRead ? status->bytesRead - job->bytesRead : 0;
+    uint32_t chunkDelta = status->chunksRead >= job->workerChunksRead ? status->chunksRead - job->workerChunksRead : 0;
+    job->bytesRead = status->bytesRead;
+    job->workerChunksRead = status->chunksRead;
+    renderer->totalDirectBlobReadBytes += (uint64_t) byteDelta;
+    if (budget != NULL) {
+        budget->chunksRead += chunkDelta;
+        budget->bytesRead += byteDelta;
+        budget->lastBytesCompleted = status->bytesRead;
+        budget->lastBytesTotal = status->totalBytes;
+    }
+}
+
 static void N3DSRenderer_cancelDirectPrefetchJob(N3DSRenderer* renderer) {
     if (renderer == NULL) return;
     N3DSDirectPrefetchJob* job = &renderer->battleDirectPrefetch;
+
+    if (job->active && job->workerBacked && job->audioSystem != NULL && job->workerRequestId != 0) {
+        N3DSAudioWorkerReadStatus status;
+        if (N3DSAudioSystem_getWorkerReadStatus(job->audioSystem, job->workerRequestId, &status)) {
+            N3DSRenderer_accountWorkerDirectPrefetchProgress(renderer, job, &status, NULL);
+        }
+        N3DSAudioSystem_cancelWorkerRead(job->audioSystem, job->workerRequestId);
+    }
+
     if (job->data != NULL) free(job->data);
     if (renderer->directPrefetchReservedBytes >= job->dataSize) renderer->directPrefetchReservedBytes -= job->dataSize;
     else renderer->directPrefetchReservedBytes = 0;
@@ -2003,7 +2040,12 @@ static bool N3DSRenderer_publishDirectPrefetchJob(N3DSRenderer* renderer) {
     return published || (asset->blobData != NULL && asset->blobSize > 0);
 }
 
-static bool N3DSRenderer_beginPackedDirectPrefetch(N3DSRenderer* renderer, N3DSDirectTextureAsset* asset, const char* relativePath) {
+static bool N3DSRenderer_beginPackedDirectPrefetch(
+    N3DSRenderer* renderer,
+    AudioSystem* audioSystem,
+    N3DSDirectTextureAsset* asset,
+    const char* relativePath
+) {
     if (renderer == NULL || asset == NULL || relativePath == NULL) return false;
     if (asset->blobData != NULL && asset->blobSize > 0) return true;
     if (renderer->battleDirectPrefetch.active) return renderer->battleDirectPrefetch.asset == asset;
@@ -2019,16 +2061,40 @@ static bool N3DSRenderer_beginPackedDirectPrefetch(N3DSRenderer* renderer, N3DSD
         (uint64_t) entry.dataSize > (uint64_t) renderer->cachedDirectT3xByteLimit) {
         if (!N3DSRenderer_evictLRUDirectAssetBlob(renderer, asset)) break;
     }
+
+    N3DSDirectPrefetchJob* job = &renderer->battleDirectPrefetch;
+    uint32_t workerRequestId = 0;
+    if (audioSystem != NULL && renderer->packedDirectAssetPath[0] != '\0') {
+        workerRequestId = N3DSAudioSystem_beginWorkerRead(
+            audioSystem,
+            renderer->packedDirectAssetPath,
+            entry.dataOffset,
+            entry.dataSize
+        );
+    }
+
+    if (workerRequestId != 0) {
+        job->asset = asset;
+        job->audioSystem = audioSystem;
+        job->dataOffset = entry.dataOffset;
+        job->dataSize = entry.dataSize;
+        job->workerRequestId = workerRequestId;
+        job->active = true;
+        job->workerBacked = true;
+        renderer->directPrefetchReservedBytes += entry.dataSize;
+        return true;
+    }
+
     uint8_t* data = safeMalloc((size_t) entry.dataSize);
     if (data == NULL) return false;
 
-    N3DSDirectPrefetchJob* job = &renderer->battleDirectPrefetch;
     job->asset = asset;
     job->data = data;
     job->dataOffset = entry.dataOffset;
     job->dataSize = entry.dataSize;
     job->bytesRead = 0;
     job->active = true;
+    job->workerBacked = false;
     renderer->directPrefetchReservedBytes += entry.dataSize;
     clearerr(renderer->packedDirectAssetFile);
     return true;
@@ -2036,7 +2102,7 @@ static bool N3DSRenderer_beginPackedDirectPrefetch(N3DSRenderer* renderer, N3DSD
 
 static bool N3DSRenderer_directPrefetchBudgetExhausted(const N3DSDirectPrefetchTickBudget* budget) {
     if (budget == NULL) return false;
-    if (budget->chunksRead >= N3DS_BATTLE_DIRECT_PREFETCH_MAX_CHUNKS_PER_TICK) return true;
+    if (budget->blockingChunksRead >= N3DS_BATTLE_DIRECT_PREFETCH_MAX_CHUNKS_PER_TICK) return true;
     return N3DSRenderer_ticksToMs(svcGetSystemTick() - budget->startTick) >= N3DS_BATTLE_DIRECT_PREFETCH_BUDGET_MS;
 }
 
@@ -2055,6 +2121,46 @@ static N3DSDirectPrefetchStatus N3DSRenderer_tickDirectPrefetchJob(
     }
 
     N3DSDirectPrefetchJob* job = &renderer->battleDirectPrefetch;
+    if (job->workerBacked) {
+        while (job->active) {
+            N3DSAudioWorkerReadStatus status;
+            if (job->audioSystem == NULL ||
+                job->workerRequestId == 0 ||
+                !N3DSAudioSystem_getWorkerReadStatus(job->audioSystem, job->workerRequestId, &status)) {
+                N3DSRenderer_cancelDirectPrefetchJob(renderer);
+                return N3DS_DIRECT_PREFETCH_FAILED;
+            }
+
+            N3DSRenderer_accountWorkerDirectPrefetchProgress(renderer, job, &status, budget);
+            if (status.ready) {
+                uint8_t* data = NULL;
+                uint32_t dataSize = 0;
+                bool taken = N3DSAudioSystem_takeWorkerRead(
+                    job->audioSystem,
+                    job->workerRequestId,
+                    &data,
+                    &dataSize
+                );
+                if (!taken || data == NULL || dataSize != job->dataSize) {
+                    free(data);
+                    N3DSRenderer_cancelDirectPrefetchJob(renderer);
+                    return N3DS_DIRECT_PREFETCH_FAILED;
+                }
+                job->data = data;
+                job->bytesRead = dataSize;
+                return N3DSRenderer_publishDirectPrefetchJob(renderer) ?
+                    N3DS_DIRECT_PREFETCH_COMPLETE : N3DS_DIRECT_PREFETCH_FAILED;
+            }
+
+            if (!drain) return N3DS_DIRECT_PREFETCH_PENDING;
+            if (!N3DSAudioSystem_waitWorkerRead(job->audioSystem, job->workerRequestId)) {
+                N3DSRenderer_cancelDirectPrefetchJob(renderer);
+                return N3DS_DIRECT_PREFETCH_FAILED;
+            }
+        }
+        return N3DS_DIRECT_PREFETCH_COMPLETE;
+    }
+
     while (job->active) {
         if (job->bytesRead >= job->dataSize) {
             return N3DSRenderer_publishDirectPrefetchJob(renderer) ? N3DS_DIRECT_PREFETCH_COMPLETE : N3DS_DIRECT_PREFETCH_FAILED;
@@ -2080,6 +2186,7 @@ static N3DSDirectPrefetchStatus N3DSRenderer_tickDirectPrefetchJob(
         renderer->totalDirectBlobReadBytes += (uint64_t) chunkSize;
         if (budget != NULL) {
             budget->chunksRead++;
+            budget->blockingChunksRead++;
             budget->bytesRead += chunkSize;
             budget->lastBytesCompleted = job->bytesRead;
             budget->lastBytesTotal = job->dataSize;
@@ -3862,6 +3969,7 @@ static bool N3DSRenderer_prewarmDirectFontBlobByName(N3DSRenderer* renderer, con
 
 static bool N3DSRenderer_tickDirectTextureBlobPrefetch(
     N3DSRenderer* renderer,
+    AudioSystem* audioSystem,
     N3DSDirectTextureAsset* asset,
     const char* relativePath,
     N3DSDirectPrefetchTickBudget* budget
@@ -3872,7 +3980,7 @@ static bool N3DSRenderer_tickDirectTextureBlobPrefetch(
         return true;
     }
     if (!renderer->battleDirectPrefetch.active) {
-        if (!N3DSRenderer_beginPackedDirectPrefetch(renderer, asset, relativePath)) {
+        if (!N3DSRenderer_beginPackedDirectPrefetch(renderer, audioSystem, asset, relativePath)) {
             (void) N3DSRenderer_ensureDirectTextureBlobLoaded(renderer, asset, relativePath);
             return true;
         }
@@ -3916,11 +4024,12 @@ static void N3DSRenderer_prewarmBattleDirectSpriteBlobByName(N3DSRenderer* rende
 
 static bool N3DSRenderer_tickBattleDirectSpriteBlobByName(
     N3DSRenderer* renderer,
+    AudioSystem* audioSystem,
     const char* wantedName,
     N3DSDirectPrefetchTickBudget* budget
 ) {
 #if !N3DS_ENABLE_DIRECT_ASSETS
-    (void) renderer; (void) wantedName; (void) budget; return true;
+    (void) renderer; (void) audioSystem; (void) wantedName; (void) budget; return true;
 #else
     if (renderer == NULL || renderer->base.dataWin == NULL || wantedName == NULL) return true;
     DataWin* dw = renderer->base.dataWin;
@@ -3928,17 +4037,18 @@ static bool N3DSRenderer_tickBattleDirectSpriteBlobByName(
     if (spriteIndex < 0 || (uint32_t) spriteIndex >= renderer->directSpriteAssetCount) return true;
     char path[256];
     snprintf(path, sizeof(path), "sprites/spr_%05lu.t3x", (unsigned long) spriteIndex);
-    return N3DSRenderer_tickDirectTextureBlobPrefetch(renderer, &renderer->directSpriteAssets[spriteIndex].sheetAsset, path, budget);
+    return N3DSRenderer_tickDirectTextureBlobPrefetch(renderer, audioSystem, &renderer->directSpriteAssets[spriteIndex].sheetAsset, path, budget);
 #endif
 }
 
 static bool N3DSRenderer_tickBattleDirectFontBlobByName(
     N3DSRenderer* renderer,
+    AudioSystem* audioSystem,
     const char* wantedName,
     N3DSDirectPrefetchTickBudget* budget
 ) {
 #if !N3DS_ENABLE_DIRECT_ASSETS
-    (void) renderer; (void) wantedName; (void) budget; return true;
+    (void) renderer; (void) audioSystem; (void) wantedName; (void) budget; return true;
 #else
     if (renderer == NULL || renderer->base.dataWin == NULL || wantedName == NULL) return true;
     int32_t fontIndex = N3DSRenderer_findFontIndexByName(renderer->base.dataWin, wantedName);
@@ -3947,7 +4057,7 @@ static bool N3DSRenderer_tickBattleDirectFontBlobByName(
     if (!N3DSRenderer_shouldUseDirectFontAsset(font)) return true;
     char path[256];
     snprintf(path, sizeof(path), "fonts/font_%05d.t3x", (int) fontIndex);
-    return N3DSRenderer_tickDirectTextureBlobPrefetch(renderer, &renderer->directFontAssets[fontIndex], path, budget);
+    return N3DSRenderer_tickDirectTextureBlobPrefetch(renderer, audioSystem, &renderer->directFontAssets[fontIndex], path, budget);
 #endif
 }
 
@@ -4347,13 +4457,13 @@ bool N3DSRenderer_tickBattlePrewarm(Renderer* base, Runner* runner) {
         uint64_t stageBytesBefore = renderer->totalDirectBlobReadBytes;
         bool complete = false;
         if (stage < spriteStageCount) {
-            complete = N3DSRenderer_tickBattleDirectSpriteBlobByName(renderer, kN3DSBattleDirectSpriteNames[stage], &budget);
+            complete = N3DSRenderer_tickBattleDirectSpriteBlobByName(renderer, runner->audioSystem, kN3DSBattleDirectSpriteNames[stage], &budget);
         } else if (!N3DSRenderer_isJapaneseLanguage(runner)) {
             renderer->battleTransitionPrewarmStage = directStageCount;
             break;
         } else {
             uint32_t fontStage = stage - spriteStageCount;
-            complete = N3DSRenderer_tickBattleDirectFontBlobByName(renderer, kN3DSBattleJapaneseCommonFontNames[fontStage], &budget);
+            complete = N3DSRenderer_tickBattleDirectFontBlobByName(renderer, runner->audioSystem, kN3DSBattleJapaneseCommonFontNames[fontStage], &budget);
         }
         if (renderer->totalDirectBlobReadBytes != stageBytesBefore) {
             diag->assetStage = (int32_t) stage;

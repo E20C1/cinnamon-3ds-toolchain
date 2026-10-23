@@ -2412,8 +2412,8 @@ int main(int argc, char** argv) {
     if (!N3DSRenderer_isReady(renderer)) {
         const char* error = N3DSRenderer_getStartupError(renderer);
         N3DS_waitForStartExitScreen(&loadingScreen, error != NULL ? error : "Renderer init failed. Press START.");
-        audioSystem->vtable->destroy(audioSystem);
         renderer->vtable->destroy(renderer);
+        audioSystem->vtable->destroy(audioSystem);
         Runner_free(runner);
         N3DSFileSystem_destroy((N3DSFileSystem*) fileSystem);
         VM_free(vm);
@@ -2729,8 +2729,8 @@ int main(int argc, char** argv) {
     N3DSBattleEntryPerf_flushPending(&gN3DSBattleEntryPerfSampler);
     N3DSPerf_flushQueuedEvents(runner);
 
-    audioSystem->vtable->destroy(audioSystem);
     renderer->vtable->destroy(renderer);
+    audioSystem->vtable->destroy(audioSystem);
     Runner_free(runner);
     N3DSFileSystem_destroy((N3DSFileSystem*) fileSystem);
     VM_free(vm);

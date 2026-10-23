@@ -7,6 +7,7 @@
 
 #include <3ds.h>
 
+#include <limits.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -32,6 +33,8 @@
 #define N3DS_STREAM_WORKER_PRIORITY 0x31
 #define N3DS_STREAM_WORKER_CORE_ID 1
 #define N3DS_STREAM_WORKER_CPU_LIMIT 20u
+#define N3DS_WORKER_READ_CHUNK_BYTES (32u * 1024u)
+#define N3DS_WORKER_READ_PATH_CAP 512u
 #define N3DS_AUDIO_FILE_BUFFER_SIZE (64u * 1024u)
 #define N3DS_ENABLE_STREAM_WORKER 1
 #define N3DS_EAGER_SFX_PRELOAD 0
@@ -124,6 +127,23 @@ typedef struct {
     N3DSStreamFillCursor nextCursor;
     ndspAdpcmData adpcmStates[2];
 } N3DSAsyncStreamFill;
+
+typedef struct {
+    uint32_t requestId;
+    uint32_t offset;
+    uint32_t size;
+    uint32_t bytesRead;
+    uint32_t chunksRead;
+    char path[N3DS_WORKER_READ_PATH_CAP];
+    FILE* file;
+    uint8_t* data;
+    bool active;
+    bool requested;
+    bool inProgress;
+    bool ready;
+    bool success;
+    bool cancelRequested;
+} N3DSWorkerReadJob;
 
 typedef struct {
     bool active;
@@ -225,6 +245,8 @@ struct N3DSAudioSystem {
     Thread workerThread;
     bool workerStop;
     bool workerEnabled;
+    uint32_t nextWorkerReadRequestId;
+    N3DSWorkerReadJob workerRead;
     uint8_t* packedSoundBankData;
     uint32_t packedSoundBankSize;
     N3DSPackedSoundBankEntry* packedSoundBankEntries;
@@ -2671,6 +2693,182 @@ static bool N3DSAudio_hasPendingAsyncFillLocked(const N3DSAudioSystem* audio) {
     return false;
 }
 
+static bool N3DSAudio_hasPendingWorkerReadLocked(const N3DSAudioSystem* audio) {
+    if (audio == NULL || !audio->workerEnabled) return false;
+    return audio->workerRead.active && !audio->workerRead.ready;
+}
+
+static void N3DSAudio_closeWorkerReadResources(FILE* file, uint8_t* data) {
+    if (file != NULL) fclose(file);
+    free(data);
+}
+
+static void N3DSAudio_clearWorkerReadJobLocked(
+    N3DSAudioSystem* audio,
+    FILE** outFile,
+    uint8_t** outData
+) {
+    if (outFile != NULL) *outFile = NULL;
+    if (outData != NULL) *outData = NULL;
+    if (audio == NULL) return;
+
+    N3DSWorkerReadJob* job = &audio->workerRead;
+    if (outFile != NULL) *outFile = job->file;
+    if (outData != NULL) *outData = job->data;
+    memset(job, 0, sizeof(*job));
+    CondVar_Broadcast(&audio->workerCond);
+}
+
+static bool N3DSAudio_runWorkerReadChunk(N3DSAudioSystem* audio) {
+    if (audio == NULL || !audio->workerEnabled) return false;
+
+    uint32_t requestId = 0;
+    uint32_t offset = 0;
+    uint32_t size = 0;
+    uint32_t bytesRead = 0;
+    char path[N3DS_WORKER_READ_PATH_CAP];
+    path[0] = '\0';
+    FILE* file = NULL;
+    uint8_t* data = NULL;
+    bool startJob = false;
+
+    LightLock_Lock(&audio->lock);
+    N3DSWorkerReadJob* job = &audio->workerRead;
+    if (audio->workerStop || !job->active || job->ready) {
+        LightLock_Unlock(&audio->lock);
+        return false;
+    }
+
+    if (job->cancelRequested) {
+        N3DSAudio_clearWorkerReadJobLocked(audio, &file, &data);
+        LightLock_Unlock(&audio->lock);
+        N3DSAudio_closeWorkerReadResources(file, data);
+        return true;
+    }
+
+    requestId = job->requestId;
+    offset = job->offset;
+    size = job->size;
+    bytesRead = job->bytesRead;
+    if (job->requested && !job->inProgress) {
+        snprintf(path, sizeof(path), "%s", job->path);
+        job->requested = false;
+        job->inProgress = true;
+        startJob = true;
+    } else if (job->inProgress) {
+        file = job->file;
+        data = job->data;
+    } else {
+        LightLock_Unlock(&audio->lock);
+        return false;
+    }
+    LightLock_Unlock(&audio->lock);
+
+    if (startJob) {
+        file = fopen(path, "rb");
+        if (file != NULL) N3DSAudio_configureFileBuffer(file);
+        data = size > 0 ? malloc((size_t) size) : NULL;
+        bool started =
+            file != NULL &&
+            data != NULL &&
+            (uint64_t) offset <= (uint64_t) LONG_MAX &&
+            fseek(file, (long) offset, SEEK_SET) == 0;
+        if (!started && file != NULL) clearerr(file);
+
+        LightLock_Lock(&audio->lock);
+        job = &audio->workerRead;
+        bool current =
+            job->active &&
+            job->requestId == requestId &&
+            job->inProgress;
+        if (!current || job->cancelRequested || audio->workerStop) {
+            if (current) N3DSAudio_clearWorkerReadJobLocked(audio, NULL, NULL);
+            LightLock_Unlock(&audio->lock);
+            N3DSAudio_closeWorkerReadResources(file, data);
+            return true;
+        }
+        if (!started) {
+            job->inProgress = false;
+            job->ready = true;
+            job->success = false;
+            CondVar_Broadcast(&audio->workerCond);
+            LightLock_Unlock(&audio->lock);
+            N3DSAudio_closeWorkerReadResources(file, data);
+            return true;
+        }
+
+        job->file = file;
+        job->data = data;
+        bytesRead = job->bytesRead;
+        LightLock_Unlock(&audio->lock);
+    }
+
+    if (file == NULL || data == NULL || bytesRead >= size) {
+        LightLock_Lock(&audio->lock);
+        job = &audio->workerRead;
+        if (job->active && job->requestId == requestId && job->inProgress) {
+            FILE* closeFile = job->file;
+            job->file = NULL;
+            job->inProgress = false;
+            job->ready = true;
+            job->success = bytesRead == size && size > 0;
+            CondVar_Broadcast(&audio->workerCond);
+            LightLock_Unlock(&audio->lock);
+            if (closeFile != NULL) fclose(closeFile);
+        } else {
+            LightLock_Unlock(&audio->lock);
+        }
+        return true;
+    }
+
+    uint32_t remaining = size - bytesRead;
+    uint32_t chunkSize = remaining < N3DS_WORKER_READ_CHUNK_BYTES ?
+        remaining : N3DS_WORKER_READ_CHUNK_BYTES;
+    size_t got = fread(data + bytesRead, 1, (size_t) chunkSize, file);
+
+    FILE* closeFile = NULL;
+    uint8_t* freeData = NULL;
+    LightLock_Lock(&audio->lock);
+    job = &audio->workerRead;
+    bool current =
+        job->active &&
+        job->requestId == requestId &&
+        job->inProgress;
+    if (!current) {
+        LightLock_Unlock(&audio->lock);
+        return true;
+    }
+
+    if (job->cancelRequested || audio->workerStop) {
+        N3DSAudio_clearWorkerReadJobLocked(audio, &closeFile, &freeData);
+    } else if (got == (size_t) chunkSize) {
+        job->bytesRead += chunkSize;
+        job->chunksRead++;
+        if (job->bytesRead == job->size) {
+            closeFile = job->file;
+            job->file = NULL;
+            job->inProgress = false;
+            job->ready = true;
+            job->success = true;
+            CondVar_Broadcast(&audio->workerCond);
+        }
+    } else {
+        if (job->file != NULL) clearerr(job->file);
+        closeFile = job->file;
+        freeData = job->data;
+        job->file = NULL;
+        job->data = NULL;
+        job->inProgress = false;
+        job->ready = true;
+        job->success = false;
+        CondVar_Broadcast(&audio->workerCond);
+    }
+    LightLock_Unlock(&audio->lock);
+
+    N3DSAudio_closeWorkerReadResources(closeFile, freeData);
+    return true;
+}
+
 static void N3DSAudio_streamWorkerMain(void* arg) {
     N3DSAudioSystem* audio = (N3DSAudioSystem*) arg;
     if (audio == NULL) threadExit(0);
@@ -2707,6 +2905,9 @@ static void N3DSAudio_streamWorkerMain(void* arg) {
             LightLock_Unlock(&audio->lock);
 
             if (jobSlot < 0) {
+                // Reuse the single core-1 worker. Stream refill remains highest
+                // priority; battle asset reads yield after every 32 KiB chunk.
+                if (N3DSAudio_runWorkerReadChunk(audio)) continue;
                 if (!N3DSAudio_runCachePrewarmJob(audio)) break;
                 continue;
             }
@@ -2738,7 +2939,9 @@ static void N3DSAudio_streamWorkerMain(void* arg) {
                 inst->asyncFill.adpcmStates[1] = adpcmStates[1];
             }
             CondVar_Broadcast(&audio->workerCond);
-            bool morePending = N3DSAudio_hasPendingAsyncFillLocked(audio);
+            bool morePending =
+                N3DSAudio_hasPendingAsyncFillLocked(audio) ||
+                N3DSAudio_hasPendingWorkerReadLocked(audio);
             bool shouldStop = audio->workerStop;
             LightLock_Unlock(&audio->lock);
 
@@ -2960,6 +3163,8 @@ static void N3DSAudio_destroy(AudioSystem* base) {
         audio->workerThread = NULL;
         audio->workerEnabled = false;
     }
+    N3DSAudio_closeWorkerReadResources(audio->workerRead.file, audio->workerRead.data);
+    memset(&audio->workerRead, 0, sizeof(audio->workerRead));
     repeat(N3DS_MAX_SOUND_INSTANCES, i) {
         N3DSAudio_releaseInstance(audio, &audio->instances[i]);
     }
@@ -3915,6 +4120,150 @@ bool N3DSAudioSystem_getLastRoomPrewarmPerf(AudioSystem* base, N3DSAudioRoomPrew
     *outPerf = audio->lastRoomPrewarmPerf;
     LightLock_Unlock(&audio->lock);
     return outPerf->valid;
+}
+
+uint32_t N3DSAudioSystem_beginWorkerRead(
+    AudioSystem* base,
+    const char* path,
+    uint32_t offset,
+    uint32_t size
+) {
+    N3DSAudioSystem* audio = (N3DSAudioSystem*) base;
+    if (audio == NULL || path == NULL || path[0] == '\0' || size == 0) return 0;
+    if (strlen(path) >= N3DS_WORKER_READ_PATH_CAP) return 0;
+
+    uint32_t requestId = 0;
+    LightLock_Lock(&audio->lock);
+    if (audio->initialized &&
+        audio->workerEnabled &&
+        !audio->workerStop &&
+        !audio->workerRead.active) {
+        audio->nextWorkerReadRequestId++;
+        if (audio->nextWorkerReadRequestId == 0) audio->nextWorkerReadRequestId++;
+        requestId = audio->nextWorkerReadRequestId;
+
+        N3DSWorkerReadJob* job = &audio->workerRead;
+        memset(job, 0, sizeof(*job));
+        job->requestId = requestId;
+        job->offset = offset;
+        job->size = size;
+        snprintf(job->path, sizeof(job->path), "%s", path);
+        job->active = true;
+        job->requested = true;
+    }
+    LightLock_Unlock(&audio->lock);
+
+    if (requestId != 0) LightEvent_Signal(&audio->workerEvent);
+    return requestId;
+}
+
+bool N3DSAudioSystem_getWorkerReadStatus(
+    AudioSystem* base,
+    uint32_t requestId,
+    N3DSAudioWorkerReadStatus* outStatus
+) {
+    if (outStatus == NULL) return false;
+    memset(outStatus, 0, sizeof(*outStatus));
+    N3DSAudioSystem* audio = (N3DSAudioSystem*) base;
+    if (audio == NULL || requestId == 0) return false;
+
+    LightLock_Lock(&audio->lock);
+    N3DSWorkerReadJob* job = &audio->workerRead;
+    bool matches = job->active && job->requestId == requestId;
+    if (matches) {
+        outStatus->valid = true;
+        outStatus->active = true;
+        outStatus->ready = job->ready;
+        outStatus->success = job->ready && job->success;
+        outStatus->requestId = requestId;
+        outStatus->bytesRead = job->bytesRead;
+        outStatus->totalBytes = job->size;
+        outStatus->chunksRead = job->chunksRead;
+    }
+    LightLock_Unlock(&audio->lock);
+    return matches;
+}
+
+bool N3DSAudioSystem_waitWorkerRead(AudioSystem* base, uint32_t requestId) {
+    N3DSAudioSystem* audio = (N3DSAudioSystem*) base;
+    if (audio == NULL || requestId == 0) return false;
+
+    LightLock_Lock(&audio->lock);
+    while (!audio->workerStop &&
+        audio->workerRead.active &&
+        audio->workerRead.requestId == requestId &&
+        !audio->workerRead.ready) {
+        CondVar_Wait(&audio->workerCond, &audio->lock);
+    }
+    bool ready =
+        audio->workerRead.active &&
+        audio->workerRead.requestId == requestId &&
+        audio->workerRead.ready;
+    LightLock_Unlock(&audio->lock);
+    return ready;
+}
+
+bool N3DSAudioSystem_takeWorkerRead(
+    AudioSystem* base,
+    uint32_t requestId,
+    uint8_t** outData,
+    uint32_t* outSize
+) {
+    if (outData != NULL) *outData = NULL;
+    if (outSize != NULL) *outSize = 0;
+    N3DSAudioSystem* audio = (N3DSAudioSystem*) base;
+    if (audio == NULL || requestId == 0) return false;
+
+    FILE* closeFile = NULL;
+    uint8_t* data = NULL;
+    uint32_t size = 0;
+    bool success = false;
+
+    LightLock_Lock(&audio->lock);
+    N3DSWorkerReadJob* job = &audio->workerRead;
+    if (job->active && job->requestId == requestId && job->ready) {
+        success = job->success && job->data != NULL && job->bytesRead == job->size;
+        size = job->size;
+        closeFile = job->file;
+        data = job->data;
+        job->file = NULL;
+        job->data = NULL;
+        memset(job, 0, sizeof(*job));
+        CondVar_Broadcast(&audio->workerCond);
+    }
+    LightLock_Unlock(&audio->lock);
+
+    if (closeFile != NULL) fclose(closeFile);
+    if (success && outData != NULL) {
+        *outData = data;
+        if (outSize != NULL) *outSize = size;
+        data = NULL;
+    }
+    free(data);
+    return success;
+}
+
+void N3DSAudioSystem_cancelWorkerRead(AudioSystem* base, uint32_t requestId) {
+    N3DSAudioSystem* audio = (N3DSAudioSystem*) base;
+    if (audio == NULL || requestId == 0) return;
+
+    FILE* closeFile = NULL;
+    uint8_t* freeData = NULL;
+    bool signalWorker = false;
+    LightLock_Lock(&audio->lock);
+    N3DSWorkerReadJob* job = &audio->workerRead;
+    if (job->active && job->requestId == requestId) {
+        if (job->inProgress) {
+            job->cancelRequested = true;
+            signalWorker = true;
+        } else {
+            N3DSAudio_clearWorkerReadJobLocked(audio, &closeFile, &freeData);
+        }
+    }
+    LightLock_Unlock(&audio->lock);
+
+    N3DSAudio_closeWorkerReadResources(closeFile, freeData);
+    if (signalWorker) LightEvent_Signal(&audio->workerEvent);
 }
 
 void N3DSAudioSystem_getCacheStats(
