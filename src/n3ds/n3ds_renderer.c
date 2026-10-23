@@ -10,6 +10,7 @@
 #include <tex3ds.h>
 #include <stb/ds/stb_ds.h>
 
+#include <limits.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -64,6 +65,9 @@
 #define N3DS_MAX_CACHED_T3X_BYTES_NEW3DS (24u * 1024u * 1024u)
 #define N3DS_MAX_CACHED_DIRECT_T3X_BYTES_OLD3DS (4u * 1024u * 1024u)
 #define N3DS_MAX_CACHED_DIRECT_T3X_BYTES_NEW3DS (8u * 1024u * 1024u)
+#define N3DS_BATTLE_DIRECT_PREFETCH_CHUNK_BYTES (32u * 1024u)
+#define N3DS_BATTLE_DIRECT_PREFETCH_MAX_CHUNKS_PER_TICK 3u
+#define N3DS_BATTLE_DIRECT_PREFETCH_BUDGET_MS 10.0
 #define N3DS_DIRECT_ASSET_VRAM_BUDGET_OLD3DS (1024u * 1024u)
 #define N3DS_DIRECT_ASSET_VRAM_BUDGET_NEW3DS (3072u * 1024u)
 // battle screen offset
@@ -269,6 +273,21 @@ typedef struct {
 } N3DSPackedDirectAssetMapEntry;
 
 typedef struct {
+    N3DSDirectTextureAsset* asset;
+    uint8_t* data;
+    uint32_t dataOffset;
+    uint32_t dataSize;
+    uint32_t bytesRead;
+    bool active;
+} N3DSDirectPrefetchJob;
+
+typedef enum {
+    N3DS_DIRECT_PREFETCH_PENDING = 0,
+    N3DS_DIRECT_PREFETCH_COMPLETE = 1,
+    N3DS_DIRECT_PREFETCH_FAILED = 2,
+} N3DSDirectPrefetchStatus;
+
+typedef struct {
     uint32_t roomIndex;
     uint32_t pageStart;
     uint32_t pageCount;
@@ -343,6 +362,7 @@ typedef struct N3DSRenderer {
     uint32_t cachedT3xBytes;
     uint32_t cachedDirectT3xByteLimit;
     uint32_t cachedDirectT3xBytes;
+    uint32_t directPrefetchReservedBytes;
     uint64_t totalAtlasBlobReads;
     uint64_t totalAtlasBlobReadBytes;
     uint64_t totalDirectBlobReads;
@@ -395,9 +415,15 @@ typedef struct N3DSRenderer {
     int32_t battleControllerObjectIndex;
     int32_t battleBlconObjectIndex;
     int32_t battlerObjectIndex;
-    int32_t battlerStoryObjectIndex;
     int32_t battleWriterObjectIndex;
     bool battleTransitionPrewarmSeen;
+    N3DSDirectPrefetchJob battleDirectPrefetch;
+    bool battleTransitionManifestLoaded;
+    bool battleTransitionManifestAttempted;
+    bool battleTransitionManifestFound;
+    uint32_t battleTransitionManifestPageCount;
+    uint32_t battleTransitionManifestColdReads;
+    uint64_t battleTransitionManifestReadBytes;
     N3DSRoomPrewarmPerf lastRoomPrewarmPerf;
     N3DSCachedTextLayout cachedTextLayout;
     N3DSResolvedAssetPathEntry* resolvedAssetPathCache;
@@ -1466,7 +1492,9 @@ static bool N3DSRenderer_tryLoadPackedDirectTextureBlob(N3DSRenderer* renderer, 
     N3DSPackedDirectAssetEntry entry = renderer->packedDirectAssetMap[mapIndex].value;
     if (entry.dataSize == 0) return false;
 
-    while (renderer->cachedDirectT3xBytes + entry.dataSize > renderer->cachedDirectT3xByteLimit) {
+    while ((uint64_t) renderer->cachedDirectT3xBytes +
+        (uint64_t) renderer->directPrefetchReservedBytes +
+        (uint64_t) entry.dataSize > (uint64_t) renderer->cachedDirectT3xByteLimit) {
         if (!N3DSRenderer_evictLRUDirectAssetBlob(renderer, asset)) break;
     }
 
@@ -1927,11 +1955,120 @@ static bool N3DSRenderer_evictLRUDirectAssetBlob(N3DSRenderer* renderer, const N
     return true;
 }
 
+static void N3DSRenderer_cancelDirectPrefetchJob(N3DSRenderer* renderer) {
+    if (renderer == NULL) return;
+    N3DSDirectPrefetchJob* job = &renderer->battleDirectPrefetch;
+    if (job->data != NULL) free(job->data);
+    if (renderer->directPrefetchReservedBytes >= job->dataSize) renderer->directPrefetchReservedBytes -= job->dataSize;
+    else renderer->directPrefetchReservedBytes = 0;
+    memset(job, 0, sizeof(*job));
+}
+
+static bool N3DSRenderer_publishDirectPrefetchJob(N3DSRenderer* renderer) {
+    if (renderer == NULL) return false;
+    N3DSDirectPrefetchJob* job = &renderer->battleDirectPrefetch;
+    if (!job->active || job->asset == NULL || job->data == NULL || job->dataSize == 0 || job->bytesRead != job->dataSize) return false;
+
+    N3DSDirectTextureAsset* asset = job->asset;
+    uint8_t* data = job->data;
+    uint32_t dataSize = job->dataSize;
+    bool published = false;
+    if (asset->blobData == NULL || asset->blobSize == 0) {
+        asset->blobData = data;
+        asset->blobSize = dataSize;
+        asset->blobLastUsedStamp = ++renderer->directBlobUseCounter;
+        renderer->cachedDirectT3xBytes += dataSize;
+        renderer->frameDirectBlobReads++;
+        renderer->totalDirectBlobReads++;
+        published = true;
+        data = NULL;
+    }
+    if (data != NULL) free(data);
+    if (renderer->directPrefetchReservedBytes >= dataSize) renderer->directPrefetchReservedBytes -= dataSize;
+    else renderer->directPrefetchReservedBytes = 0;
+    memset(job, 0, sizeof(*job));
+    return published || (asset->blobData != NULL && asset->blobSize > 0);
+}
+
+static bool N3DSRenderer_beginPackedDirectPrefetch(N3DSRenderer* renderer, N3DSDirectTextureAsset* asset, const char* relativePath) {
+    if (renderer == NULL || asset == NULL || relativePath == NULL) return false;
+    if (asset->blobData != NULL && asset->blobSize > 0) return true;
+    if (renderer->battleDirectPrefetch.active) return renderer->battleDirectPrefetch.asset == asset;
+    if (renderer->packedDirectAssetFile == NULL || renderer->packedDirectAssetMap == NULL) return false;
+
+    ptrdiff_t mapIndex = shgeti(renderer->packedDirectAssetMap, relativePath);
+    if (mapIndex < 0) return false;
+    N3DSPackedDirectAssetEntry entry = renderer->packedDirectAssetMap[mapIndex].value;
+    if (entry.dataSize == 0) return false;
+
+    while ((uint64_t) renderer->cachedDirectT3xBytes +
+        (uint64_t) renderer->directPrefetchReservedBytes +
+        (uint64_t) entry.dataSize > (uint64_t) renderer->cachedDirectT3xByteLimit) {
+        if (!N3DSRenderer_evictLRUDirectAssetBlob(renderer, asset)) break;
+    }
+    uint8_t* data = safeMalloc((size_t) entry.dataSize);
+    if (data == NULL) return false;
+
+    N3DSDirectPrefetchJob* job = &renderer->battleDirectPrefetch;
+    job->asset = asset;
+    job->data = data;
+    job->dataOffset = entry.dataOffset;
+    job->dataSize = entry.dataSize;
+    job->bytesRead = 0;
+    job->active = true;
+    renderer->directPrefetchReservedBytes += entry.dataSize;
+    clearerr(renderer->packedDirectAssetFile);
+    return true;
+}
+
+static N3DSDirectPrefetchStatus N3DSRenderer_tickDirectPrefetchJob(N3DSRenderer* renderer, bool drain) {
+    if (renderer == NULL || !renderer->battleDirectPrefetch.active) return N3DS_DIRECT_PREFETCH_COMPLETE;
+
+    N3DSDirectPrefetchJob* job = &renderer->battleDirectPrefetch;
+    u64 startTick = svcGetSystemTick();
+    uint32_t chunksRead = 0;
+    while (job->active) {
+        if (job->bytesRead >= job->dataSize) {
+            return N3DSRenderer_publishDirectPrefetchJob(renderer) ? N3DS_DIRECT_PREFETCH_COMPLETE : N3DS_DIRECT_PREFETCH_FAILED;
+        }
+        uint32_t remaining = job->dataSize - job->bytesRead;
+        uint32_t chunkSize = remaining < N3DS_BATTLE_DIRECT_PREFETCH_CHUNK_BYTES ? remaining : N3DS_BATTLE_DIRECT_PREFETCH_CHUNK_BYTES;
+        uint64_t absoluteOffset = (uint64_t) job->dataOffset + (uint64_t) job->bytesRead;
+        if (absoluteOffset > (uint64_t) LONG_MAX || fseek(renderer->packedDirectAssetFile, (long) absoluteOffset, SEEK_SET) != 0) {
+            clearerr(renderer->packedDirectAssetFile);
+            N3DSRenderer_cancelDirectPrefetchJob(renderer);
+            return N3DS_DIRECT_PREFETCH_FAILED;
+        }
+        size_t got = fread(job->data + job->bytesRead, 1, (size_t) chunkSize, renderer->packedDirectAssetFile);
+        if (got != (size_t) chunkSize) {
+            clearerr(renderer->packedDirectAssetFile);
+            N3DSRenderer_cancelDirectPrefetchJob(renderer);
+            return N3DS_DIRECT_PREFETCH_FAILED;
+        }
+        job->bytesRead += chunkSize;
+        renderer->totalDirectBlobReadBytes += (uint64_t) chunkSize;
+        chunksRead++;
+        if (job->bytesRead == job->dataSize) {
+            return N3DSRenderer_publishDirectPrefetchJob(renderer) ? N3DS_DIRECT_PREFETCH_COMPLETE : N3DS_DIRECT_PREFETCH_FAILED;
+        }
+        if (!drain) {
+            if (chunksRead >= N3DS_BATTLE_DIRECT_PREFETCH_MAX_CHUNKS_PER_TICK) return N3DS_DIRECT_PREFETCH_PENDING;
+            if (N3DSRenderer_ticksToMs(svcGetSystemTick() - startTick) >= N3DS_BATTLE_DIRECT_PREFETCH_BUDGET_MS) return N3DS_DIRECT_PREFETCH_PENDING;
+        }
+    }
+    return N3DS_DIRECT_PREFETCH_COMPLETE;
+}
+
 static bool N3DSRenderer_ensureDirectTextureBlobLoaded(N3DSRenderer* renderer, N3DSDirectTextureAsset* asset, const char* relativePath) {
     if (renderer == NULL || asset == NULL || relativePath == NULL) return false;
     if (asset->blobData != NULL && asset->blobSize > 0) {
+        if (renderer->battleDirectPrefetch.active && renderer->battleDirectPrefetch.asset == asset) N3DSRenderer_cancelDirectPrefetchJob(renderer);
         asset->blobLastUsedStamp = ++renderer->directBlobUseCounter;
         return true;
+    }
+    if (renderer->battleDirectPrefetch.active && renderer->battleDirectPrefetch.asset == asset) {
+        N3DSDirectPrefetchStatus status = N3DSRenderer_tickDirectPrefetchJob(renderer, true);
+        if (status == N3DS_DIRECT_PREFETCH_COMPLETE && asset->blobData != NULL && asset->blobSize > 0) return true;
     }
 
     if (N3DSRenderer_tryLoadPackedDirectTextureBlob(renderer, asset, relativePath)) {
@@ -1954,7 +2091,9 @@ static bool N3DSRenderer_ensureDirectTextureBlobLoaded(N3DSRenderer* renderer, N
     }
 
     uint32_t size = (uint32_t) sizeLong;
-    while (renderer->cachedDirectT3xBytes + size > renderer->cachedDirectT3xByteLimit) {
+    while ((uint64_t) renderer->cachedDirectT3xBytes +
+        (uint64_t) renderer->directPrefetchReservedBytes +
+        (uint64_t) size > (uint64_t) renderer->cachedDirectT3xByteLimit) {
         if (!N3DSRenderer_evictLRUDirectAssetBlob(renderer, asset)) break;
     }
 
@@ -3557,6 +3696,18 @@ static bool N3DSRenderer_hasLiveExactObject(Runner* runner, int32_t objectIndex)
     return false;
 }
 
+static bool N3DSRenderer_hasLiveObjectOrDescendant(Runner* runner, int32_t objectIndex) {
+    if (runner == NULL || runner->dataWin == NULL) return false;
+    if (objectIndex < 0 || (uint32_t) objectIndex >= runner->dataWin->objt.count) return false;
+    if (runner->instancesByObject == NULL) return N3DSRenderer_hasLiveExactObject(runner, objectIndex);
+    Instance** instances = runner->instancesByObject[objectIndex];
+    repeat(arrlen(instances), instanceIndex) {
+        Instance* inst = instances[instanceIndex];
+        if (inst != NULL && !inst->destroyed && inst->active) return true;
+    }
+    return false;
+}
+
 static bool N3DSRenderer_isUndertaleBattleRoom(N3DSRenderer* renderer, Runner* runner) {
     if (renderer == NULL || runner == NULL) return false;
     return N3DSRenderer_hasLiveExactObject(runner, renderer->battleControllerObjectIndex);
@@ -3623,8 +3774,7 @@ static bool N3DSRenderer_isJapaneseLanguage(Runner* runner) {
 static bool N3DSRenderer_isUndertaleBattleTransition(N3DSRenderer* renderer, Runner* runner) {
     if (renderer == NULL || runner == NULL) return false;
     return N3DSRenderer_hasLiveExactObject(runner, renderer->battleBlconObjectIndex) ||
-        N3DSRenderer_hasLiveExactObject(runner, renderer->battlerObjectIndex) ||
-        N3DSRenderer_hasLiveExactObject(runner, renderer->battlerStoryObjectIndex);
+        N3DSRenderer_hasLiveObjectOrDescendant(runner, renderer->battlerObjectIndex);
 }
 
 static bool N3DSRenderer_prewarmDirectFontBlobByIndex(N3DSRenderer* renderer, int32_t fontIndex) {
@@ -3647,6 +3797,27 @@ static bool N3DSRenderer_prewarmDirectFontBlobByIndex(N3DSRenderer* renderer, in
 static bool N3DSRenderer_prewarmDirectFontBlobByName(N3DSRenderer* renderer, const char* wantedName) {
     if (renderer == NULL || renderer->base.dataWin == NULL) return false;
     return N3DSRenderer_prewarmDirectFontBlobByIndex(renderer, N3DSRenderer_findFontIndexByName(renderer->base.dataWin, wantedName));
+}
+
+static bool N3DSRenderer_tickDirectTextureBlobPrefetch(N3DSRenderer* renderer, N3DSDirectTextureAsset* asset, const char* relativePath) {
+    if (renderer == NULL || asset == NULL || relativePath == NULL) return true;
+    if (asset->blobData != NULL && asset->blobSize > 0) {
+        asset->blobLastUsedStamp = ++renderer->directBlobUseCounter;
+        return true;
+    }
+    if (!renderer->battleDirectPrefetch.active) {
+        if (!N3DSRenderer_beginPackedDirectPrefetch(renderer, asset, relativePath)) {
+            (void) N3DSRenderer_ensureDirectTextureBlobLoaded(renderer, asset, relativePath);
+            return true;
+        }
+    } else if (renderer->battleDirectPrefetch.asset != asset) return false;
+
+    N3DSDirectPrefetchStatus status = N3DSRenderer_tickDirectPrefetchJob(renderer, false);
+    if (status == N3DS_DIRECT_PREFETCH_FAILED) {
+        (void) N3DSRenderer_ensureDirectTextureBlobLoaded(renderer, asset, relativePath);
+        return true;
+    }
+    return status == N3DS_DIRECT_PREFETCH_COMPLETE;
 }
 
 static const char* const kN3DSBattleDirectSpriteNames[] = {
@@ -3674,6 +3845,35 @@ static void N3DSRenderer_prewarmBattleDirectSpriteBlobByName(N3DSRenderer* rende
     char path[256];
     snprintf(path, sizeof(path), "sprites/spr_%05lu.t3x", (unsigned long) spriteIndex);
     (void) N3DSRenderer_ensureDirectTextureBlobLoaded(renderer, &spriteAsset->sheetAsset, path);
+#endif
+}
+
+static bool N3DSRenderer_tickBattleDirectSpriteBlobByName(N3DSRenderer* renderer, const char* wantedName) {
+#if !N3DS_ENABLE_DIRECT_ASSETS
+    (void) renderer; (void) wantedName; return true;
+#else
+    if (renderer == NULL || renderer->base.dataWin == NULL || wantedName == NULL) return true;
+    DataWin* dw = renderer->base.dataWin;
+    int32_t spriteIndex = N3DSRenderer_findSpriteIndexByName(dw, wantedName);
+    if (spriteIndex < 0 || (uint32_t) spriteIndex >= renderer->directSpriteAssetCount) return true;
+    char path[256];
+    snprintf(path, sizeof(path), "sprites/spr_%05lu.t3x", (unsigned long) spriteIndex);
+    return N3DSRenderer_tickDirectTextureBlobPrefetch(renderer, &renderer->directSpriteAssets[spriteIndex].sheetAsset, path);
+#endif
+}
+
+static bool N3DSRenderer_tickBattleDirectFontBlobByName(N3DSRenderer* renderer, const char* wantedName) {
+#if !N3DS_ENABLE_DIRECT_ASSETS
+    (void) renderer; (void) wantedName; return true;
+#else
+    if (renderer == NULL || renderer->base.dataWin == NULL || wantedName == NULL) return true;
+    int32_t fontIndex = N3DSRenderer_findFontIndexByName(renderer->base.dataWin, wantedName);
+    if (fontIndex < 0 || (uint32_t) fontIndex >= renderer->directFontAssetCount) return true;
+    Font* font = &renderer->base.dataWin->font.fonts[fontIndex];
+    if (!N3DSRenderer_shouldUseDirectFontAsset(font)) return true;
+    char path[256];
+    snprintf(path, sizeof(path), "fonts/font_%05d.t3x", (int) fontIndex);
+    return N3DSRenderer_tickDirectTextureBlobPrefetch(renderer, &renderer->directFontAssets[fontIndex], path);
 #endif
 }
 
@@ -3764,21 +3964,44 @@ static void N3DSRenderer_prewarmLiveJapaneseDirectFontBlobs(N3DSRenderer* render
     }
 }
 
+static void N3DSRenderer_resetBattleTransitionManifestDiag(N3DSRenderer* renderer) {
+    if (renderer == NULL) return;
+    renderer->battleTransitionManifestLoaded = renderer->roomManifestEntries != NULL;
+    renderer->battleTransitionManifestAttempted = false;
+    renderer->battleTransitionManifestFound = false;
+    renderer->battleTransitionManifestPageCount = 0;
+    renderer->battleTransitionManifestColdReads = 0;
+    renderer->battleTransitionManifestReadBytes = 0;
+}
+
 static bool N3DSRenderer_prewarmBattleRoomManifestNextBlob(N3DSRenderer* renderer) {
-    if (renderer == NULL || renderer->base.dataWin == NULL || renderer->roomManifestEntries == NULL) return false;
+    if (renderer == NULL || renderer->base.dataWin == NULL) return false;
+    renderer->battleTransitionManifestAttempted = true;
+    renderer->battleTransitionManifestLoaded = renderer->roomManifestEntries != NULL;
+    if (renderer->roomManifestEntries == NULL) return false;
     if (renderer->battleTransitionRoomIndex < 0) {
         renderer->battleTransitionRoomIndex = N3DSRenderer_findRoomIndexByName(renderer->base.dataWin, "room_battle");
     }
     if (renderer->battleTransitionRoomIndex < 0) return false;
     const N3DSRoomManifestEntry* entry = N3DSRenderer_findRoomManifestEntry(renderer, (uint32_t) renderer->battleTransitionRoomIndex);
-    if (entry == NULL || entry->pageCount == 0) return false;
+    if (entry == NULL) return false;
+    renderer->battleTransitionManifestFound = true;
+    renderer->battleTransitionManifestPageCount = entry->pageCount;
+    if (entry->pageCount == 0) return false;
     if (entry->pageStart > renderer->roomManifestPageRefCount) return false;
     if (entry->pageCount > renderer->roomManifestPageRefCount - entry->pageStart) return false;
     while (renderer->battleTransitionManifestOffset < entry->pageCount) {
         uint32_t refIndex = entry->pageStart + renderer->battleTransitionManifestOffset++;
         uint16_t pageIndex = renderer->roomManifestPageRefs[refIndex].pageIndex;
         if ((uint32_t) pageIndex >= renderer->atlasPageCount) continue;
+        uint64_t readsBefore = renderer->totalAtlasBlobReads;
+        uint64_t bytesBefore = renderer->totalAtlasBlobReadBytes;
         (void) N3DSRenderer_ensurePageBlobLoaded(renderer, (uint32_t) pageIndex);
+        uint64_t readDelta = renderer->totalAtlasBlobReads - readsBefore;
+        if (readDelta > 0) {
+            renderer->battleTransitionManifestColdReads += (uint32_t) readDelta;
+            renderer->battleTransitionManifestReadBytes += renderer->totalAtlasBlobReadBytes - bytesBefore;
+        }
         return true;
     }
     return false;
@@ -3944,26 +4167,46 @@ static void N3DSRenderer_prewarmJapaneseDirectFontBlobs(N3DSRenderer* renderer, 
     N3DSRenderer_prewarmLiveJapaneseDirectFontBlobs(renderer, runner);
 }
 
+static void N3DSRenderer_capturePrewarmReadPages(N3DSRenderer* renderer, uint32_t eventStart, uint32_t phaseReadCount, uint32_t* outCount, uint16_t outPages[N3DS_ROOM_PREWARM_PAGE_DIAG_CAP], bool* outTruncated) {
+    if (outCount != NULL) *outCount = 0;
+    if (outTruncated != NULL) *outTruncated = false;
+    if (renderer == NULL || outCount == NULL || outPages == NULL) return;
+    uint32_t eventEnd = renderer->frameBlobReadEventCount;
+    if (eventEnd > N3DS_FRAME_PAGE_IMPORT_EVENT_CAP) eventEnd = N3DS_FRAME_PAGE_IMPORT_EVENT_CAP;
+    if (eventStart > eventEnd) eventStart = eventEnd;
+    for (uint32_t eventIndex = eventStart; eventIndex < eventEnd && *outCount < N3DS_ROOM_PREWARM_PAGE_DIAG_CAP; eventIndex++) {
+        outPages[(*outCount)++] = renderer->frameBlobReadEventPages[eventIndex];
+    }
+    if (outTruncated != NULL && phaseReadCount > *outCount) *outTruncated = true;
+}
+
 bool N3DSRenderer_tickBattlePrewarm(Renderer* base, Runner* runner) {
     if (base == NULL || runner == NULL || runner->currentRoom == NULL) return false;
     N3DSRenderer* renderer = (N3DSRenderer*) base;
 
     if (N3DSRenderer_isUndertaleBattleRoom(renderer, runner)) {
+        // Room prewarm should have consumed any target job. Drop any unexpected
+        // leftover staging buffer rather than carrying reserved RAM through battle.
+        N3DSRenderer_cancelDirectPrefetchJob(renderer);
         N3DSRenderer_prewarmLiveJapaneseDirectFontBlobs(renderer, runner);
         return false;
     }
 
     if (!N3DSRenderer_isUndertaleBattleTransition(renderer, runner)) {
+        N3DSRenderer_cancelDirectPrefetchJob(renderer);
         renderer->battleTransitionPrewarmSeen = false;
         renderer->battleTransitionPrewarmStage = 0;
         renderer->battleTransitionManifestOffset = 0;
+        N3DSRenderer_resetBattleTransitionManifestDiag(renderer);
         return false;
     }
 
     if (!renderer->battleTransitionPrewarmSeen) {
+        N3DSRenderer_cancelDirectPrefetchJob(renderer);
         renderer->battleTransitionPrewarmSeen = true;
         renderer->battleTransitionPrewarmStage = 0;
         renderer->battleTransitionManifestOffset = 0;
+        N3DSRenderer_resetBattleTransitionManifestDiag(renderer);
     }
 
     if (renderer->battleTransitionPrewarmStage == UINT32_MAX) return true;
@@ -3972,8 +4215,9 @@ bool N3DSRenderer_tickBattlePrewarm(Renderer* base, Runner* runner) {
     const uint32_t fontStageCount = (uint32_t) (sizeof(kN3DSBattleJapaneseCommonFontNames) / sizeof(kN3DSBattleJapaneseCommonFontNames[0]));
 
     if (renderer->battleTransitionPrewarmStage < spriteStageCount) {
-        N3DSRenderer_prewarmBattleDirectSpriteBlobByName(renderer, kN3DSBattleDirectSpriteNames[renderer->battleTransitionPrewarmStage]);
-        renderer->battleTransitionPrewarmStage++;
+        if (N3DSRenderer_tickBattleDirectSpriteBlobByName(renderer, kN3DSBattleDirectSpriteNames[renderer->battleTransitionPrewarmStage])) {
+            renderer->battleTransitionPrewarmStage++;
+        }
         return true;
     }
 
@@ -3982,8 +4226,9 @@ bool N3DSRenderer_tickBattlePrewarm(Renderer* base, Runner* runner) {
             renderer->battleTransitionPrewarmStage = spriteStageCount + fontStageCount;
         } else {
             uint32_t fontStage = renderer->battleTransitionPrewarmStage - spriteStageCount;
-            (void) N3DSRenderer_prewarmDirectFontBlobByName(renderer, kN3DSBattleJapaneseCommonFontNames[fontStage]);
-            renderer->battleTransitionPrewarmStage++;
+            if (N3DSRenderer_tickBattleDirectFontBlobByName(renderer, kN3DSBattleJapaneseCommonFontNames[fontStage])) {
+                renderer->battleTransitionPrewarmStage++;
+            }
             return true;
         }
     }
@@ -4009,6 +4254,14 @@ static void N3DSRenderer_prewarmRoom(Renderer* base, Runner* runner) {
     perf.atlasCacheBytesBefore = renderer->cachedT3xBytes;
     perf.directCacheBytesBefore = renderer->cachedDirectT3xBytes;
     perf.directVRAMBytesBefore = renderer->residentDirectAssetVRAMBytes;
+    if (battleRoom) {
+        perf.battleManifestLoaded = renderer->battleTransitionManifestLoaded;
+        perf.battleManifestAttempted = renderer->battleTransitionManifestAttempted;
+        perf.battleManifestFound = renderer->battleTransitionManifestFound;
+        perf.battleManifestPageCount = renderer->battleTransitionManifestPageCount;
+        perf.battleManifestColdReads = renderer->battleTransitionManifestColdReads;
+        perf.battleManifestReadBytes = renderer->battleTransitionManifestReadBytes;
+    }
     u64 totalStartTick = svcGetSystemTick();
 
     u64 phaseStartTick = svcGetSystemTick();
@@ -4053,14 +4306,17 @@ static void N3DSRenderer_prewarmRoom(Renderer* base, Runner* runner) {
 
     readsBefore = renderer->totalAtlasBlobReads;
     bytesBefore = renderer->totalAtlasBlobReadBytes;
+    uint32_t readEventsBefore = renderer->frameBlobReadEventCount;
     phaseStartTick = svcGetSystemTick();
     N3DSRenderer_prewarmRoomBlobCache(renderer, runner);
     perf.roomAtlasMs = N3DSRenderer_ticksToMs(svcGetSystemTick() - phaseStartTick);
     perf.roomAtlasReads = (uint32_t) (renderer->totalAtlasBlobReads - readsBefore);
     perf.roomAtlasReadBytes = renderer->totalAtlasBlobReadBytes - bytesBefore;
+    N3DSRenderer_capturePrewarmReadPages(renderer, readEventsBefore, perf.roomAtlasReads, &perf.roomAtlasReadPageCount, perf.roomAtlasReadPages, &perf.roomAtlasReadPagesTruncated);
 
     readsBefore = renderer->totalAtlasBlobReads;
     bytesBefore = renderer->totalAtlasBlobReadBytes;
+    readEventsBefore = renderer->frameBlobReadEventCount;
     phaseStartTick = svcGetSystemTick();
     if (battleRoom) {
         N3DSRenderer_prewarmBattleCriticalAtlasBlobs(renderer, runner);
@@ -4068,6 +4324,7 @@ static void N3DSRenderer_prewarmRoom(Renderer* base, Runner* runner) {
     perf.battleCriticalMs = N3DSRenderer_ticksToMs(svcGetSystemTick() - phaseStartTick);
     perf.battleCriticalReads = (uint32_t) (renderer->totalAtlasBlobReads - readsBefore);
     perf.battleCriticalReadBytes = renderer->totalAtlasBlobReadBytes - bytesBefore;
+    N3DSRenderer_capturePrewarmReadPages(renderer, readEventsBefore, perf.battleCriticalReads, &perf.battleCriticalReadPageCount, perf.battleCriticalReadPages, &perf.battleCriticalReadPagesTruncated);
 
     perf.atlasCacheBytesAfter = renderer->cachedT3xBytes;
     perf.directCacheBytesAfter = renderer->cachedDirectT3xBytes;
@@ -4089,7 +4346,6 @@ static void N3DSRenderer_init(Renderer* base, DataWin* dataWin) {
     renderer->battleControllerObjectIndex = N3DSRenderer_findObjectIndexByName(dataWin, "obj_battlecontroller");
     renderer->battleBlconObjectIndex = N3DSRenderer_findObjectIndexByName(dataWin, "obj_battleblcon");
     renderer->battlerObjectIndex = N3DSRenderer_findObjectIndexByName(dataWin, "obj_battler");
-    renderer->battlerStoryObjectIndex = N3DSRenderer_findObjectIndexByName(dataWin, "obj_battlerstory");
     renderer->battleWriterObjectIndex = N3DSRenderer_findObjectIndexByName(dataWin, "obj_base_writer");
     renderer->topTarget = C2D_CreateScreenTarget(GFX_TOP, GFX_LEFT);
 #ifndef N3DS_DISABLE_BOTTOM_SCREEN
@@ -4149,6 +4405,7 @@ static void N3DSRenderer_destroy(Renderer* base) {
         gN3DSDialogueRenderTraceFile = NULL;
     }
     N3DSRenderer* renderer = (N3DSRenderer*) base;
+    N3DSRenderer_cancelDirectPrefetchJob(renderer);
     repeat(renderer->atlasPageCount, i) {
         N3DSRenderer_unloadPage(renderer, (uint32_t) i);
         N3DSRenderer_unloadPageBlob(renderer, (uint32_t) i);

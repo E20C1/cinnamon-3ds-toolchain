@@ -163,9 +163,21 @@ typedef struct {
     double prewarmRoomAtlasMs;
     uint32_t prewarmRoomAtlasReads;
     uint64_t prewarmRoomAtlasReadBytes;
+    uint32_t prewarmRoomAtlasReadPageCount;
+    uint16_t prewarmRoomAtlasReadPages[N3DS_ROOM_PREWARM_PAGE_DIAG_CAP];
+    int32_t prewarmRoomAtlasReadPagesTruncated;
     double prewarmBattleCriticalMs;
     uint32_t prewarmBattleCriticalReads;
     uint64_t prewarmBattleCriticalReadBytes;
+    uint32_t prewarmBattleCriticalReadPageCount;
+    uint16_t prewarmBattleCriticalReadPages[N3DS_ROOM_PREWARM_PAGE_DIAG_CAP];
+    int32_t prewarmBattleCriticalReadPagesTruncated;
+    int32_t battleManifestLoaded;
+    int32_t battleManifestAttempted;
+    int32_t battleManifestFound;
+    uint32_t battleManifestPageCount;
+    uint32_t battleManifestColdReads;
+    uint64_t battleManifestReadBytes;
     uint32_t prewarmAtlasCacheBytesBefore;
     uint32_t prewarmAtlasCacheBytesAfter;
     uint32_t prewarmDirectCacheBytesBefore;
@@ -969,9 +981,25 @@ static N3DSDustPerfFrame N3DSDustPerf_captureFrame(
                 sample.prewarmRoomAtlasMs = prewarmPerf.roomAtlasMs;
                 sample.prewarmRoomAtlasReads = prewarmPerf.roomAtlasReads;
                 sample.prewarmRoomAtlasReadBytes = prewarmPerf.roomAtlasReadBytes;
+                sample.prewarmRoomAtlasReadPageCount = prewarmPerf.roomAtlasReadPageCount;
+                repeat(sample.prewarmRoomAtlasReadPageCount, pageIndex) {
+                    sample.prewarmRoomAtlasReadPages[pageIndex] = prewarmPerf.roomAtlasReadPages[pageIndex];
+                }
+                sample.prewarmRoomAtlasReadPagesTruncated = prewarmPerf.roomAtlasReadPagesTruncated ? 1 : 0;
                 sample.prewarmBattleCriticalMs = prewarmPerf.battleCriticalMs;
                 sample.prewarmBattleCriticalReads = prewarmPerf.battleCriticalReads;
                 sample.prewarmBattleCriticalReadBytes = prewarmPerf.battleCriticalReadBytes;
+                sample.prewarmBattleCriticalReadPageCount = prewarmPerf.battleCriticalReadPageCount;
+                repeat(sample.prewarmBattleCriticalReadPageCount, pageIndex) {
+                    sample.prewarmBattleCriticalReadPages[pageIndex] = prewarmPerf.battleCriticalReadPages[pageIndex];
+                }
+                sample.prewarmBattleCriticalReadPagesTruncated = prewarmPerf.battleCriticalReadPagesTruncated ? 1 : 0;
+                sample.battleManifestLoaded = prewarmPerf.battleManifestLoaded ? 1 : 0;
+                sample.battleManifestAttempted = prewarmPerf.battleManifestAttempted ? 1 : 0;
+                sample.battleManifestFound = prewarmPerf.battleManifestFound ? 1 : 0;
+                sample.battleManifestPageCount = prewarmPerf.battleManifestPageCount;
+                sample.battleManifestColdReads = prewarmPerf.battleManifestColdReads;
+                sample.battleManifestReadBytes = prewarmPerf.battleManifestReadBytes;
                 sample.prewarmAtlasCacheBytesBefore = prewarmPerf.atlasCacheBytesBefore;
                 sample.prewarmAtlasCacheBytesAfter = prewarmPerf.atlasCacheBytesAfter;
                 sample.prewarmDirectCacheBytesBefore = prewarmPerf.directCacheBytesBefore;
@@ -1114,6 +1142,20 @@ static const char* N3DSPerf_directLoadKindName(uint32_t kind) {
     }
 }
 
+static void N3DSPerf_formatPageList(char* out, size_t outSize, const uint16_t* pages, uint32_t pageCount) {
+    if (out == NULL || outSize == 0) return;
+    out[0] = '\0';
+    if (pages == NULL) return;
+
+    size_t cursor = 0;
+    repeat(pageCount, pageIndex) {
+        int written = snprintf(out + cursor, outSize - cursor, "%s%u",
+            pageIndex == 0 ? "" : "|", (unsigned int) pages[pageIndex]);
+        if (written <= 0 || (size_t) written >= outSize - cursor) break;
+        cursor += (size_t) written;
+    }
+}
+
 static void N3DSPerf_queueEvent(
     const N3DSDustPerfSampler* sampler,
     const char* eventName,
@@ -1163,8 +1205,9 @@ static void N3DSPerf_writeEventToFile(
         "prewarm_battle_room,prewarm_total_ms,prewarm_clear_pins_ms,prewarm_flush_direct_ms,"
         "prewarm_battle_direct_ms,prewarm_battle_direct_reads,prewarm_battle_direct_bytes,"
         "prewarm_japanese_fonts_ms,prewarm_japanese_font_reads,prewarm_japanese_font_bytes,"
-        "prewarm_room_atlas_ms,prewarm_room_atlas_reads,prewarm_room_atlas_bytes,"
-        "prewarm_battle_critical_ms,prewarm_battle_critical_reads,prewarm_battle_critical_bytes,"
+        "prewarm_room_atlas_ms,prewarm_room_atlas_reads,prewarm_room_atlas_bytes,prewarm_room_atlas_pages,prewarm_room_atlas_pages_truncated,"
+        "prewarm_battle_critical_ms,prewarm_battle_critical_reads,prewarm_battle_critical_bytes,prewarm_battle_critical_pages,prewarm_battle_critical_pages_truncated,"
+        "battle_manifest_loaded,battle_manifest_attempted,battle_manifest_found,battle_manifest_page_count,battle_manifest_cold_reads,battle_manifest_read_bytes,"
         "prewarm_atlas_cache_before,prewarm_atlas_cache_after,prewarm_direct_cache_before,prewarm_direct_cache_after,"
         "prewarm_direct_vram_before,prewarm_direct_vram_after_flush,prewarm_direct_vram_after,"
         "audio_prewarm_worker,audio_cache_before,audio_cache_after,audio_pending_sounds,audio_pending_bytes\n", file);
@@ -1231,6 +1274,13 @@ static void N3DSPerf_writeEventToFile(
             if (written <= 0 || (size_t) written >= sizeof(frameImportEvents) - frameImportEventsCursor) break;
             frameImportEventsCursor += (size_t) written;
         }
+
+        char prewarmRoomAtlasPages[128];
+        char prewarmBattleCriticalPages[128];
+        N3DSPerf_formatPageList(prewarmRoomAtlasPages, sizeof(prewarmRoomAtlasPages),
+            sample->prewarmRoomAtlasReadPages, sample->prewarmRoomAtlasReadPageCount);
+        N3DSPerf_formatPageList(prewarmBattleCriticalPages, sizeof(prewarmBattleCriticalPages),
+            sample->prewarmBattleCriticalReadPages, sample->prewarmBattleCriticalReadPageCount);
 
         char atlasPages[128];
         atlasPages[0] = '\0';
@@ -1329,8 +1379,8 @@ static void N3DSPerf_writeEventToFile(
             sample->topStepObjectMs, (unsigned long) sample->topStepObjectCalls);
         fprintf(file,
             ",%ld,%ld,%ld,%.3f,%.3f,%.3f,%.3f,%.3f,%ld,%.3f,%.3f,%.3f,"
-            "%.3f,%lu,%llu,%.3f,%lu,%llu,%.3f,%lu,%llu,%.3f,%lu,%llu,"
-            "%lu,%lu,%lu,%lu,%lu,%lu,%lu,%ld,%lu,%lu,%lu,%lu\n",
+            "%.3f,%lu,%llu,%.3f,%lu,%llu,%.3f,%lu,%llu,%s,%ld,%.3f,%lu,%llu,%s,%ld,"
+            "%ld,%ld,%ld,%lu,%lu,%llu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%ld,%lu,%lu,%lu,%lu\n",
             (long) sample->roomTransitioned,
             (long) sample->roomFromIndex,
             (long) sample->roomToIndex,
@@ -1352,9 +1402,19 @@ static void N3DSPerf_writeEventToFile(
             sample->prewarmRoomAtlasMs,
             (unsigned long) sample->prewarmRoomAtlasReads,
             (unsigned long long) sample->prewarmRoomAtlasReadBytes,
+            prewarmRoomAtlasPages,
+            (long) sample->prewarmRoomAtlasReadPagesTruncated,
             sample->prewarmBattleCriticalMs,
             (unsigned long) sample->prewarmBattleCriticalReads,
             (unsigned long long) sample->prewarmBattleCriticalReadBytes,
+            prewarmBattleCriticalPages,
+            (long) sample->prewarmBattleCriticalReadPagesTruncated,
+            (long) sample->battleManifestLoaded,
+            (long) sample->battleManifestAttempted,
+            (long) sample->battleManifestFound,
+            (unsigned long) sample->battleManifestPageCount,
+            (unsigned long) sample->battleManifestColdReads,
+            (unsigned long long) sample->battleManifestReadBytes,
             (unsigned long) sample->prewarmAtlasCacheBytesBefore,
             (unsigned long) sample->prewarmAtlasCacheBytesAfter,
             (unsigned long) sample->prewarmDirectCacheBytesBefore,

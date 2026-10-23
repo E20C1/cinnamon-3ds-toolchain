@@ -2,6 +2,8 @@
 
 #include "../renderer.h"
 
+#define N3DS_ROOM_PREWARM_PAGE_DIAG_CAP 16u
+
 typedef struct {
     bool valid;
     bool battleRoom;
@@ -19,8 +21,20 @@ typedef struct {
     uint64_t japaneseFontReadBytes;
     uint32_t roomAtlasReads;
     uint64_t roomAtlasReadBytes;
+    uint32_t roomAtlasReadPageCount;
+    uint16_t roomAtlasReadPages[N3DS_ROOM_PREWARM_PAGE_DIAG_CAP];
+    bool roomAtlasReadPagesTruncated;
     uint32_t battleCriticalReads;
     uint64_t battleCriticalReadBytes;
+    uint32_t battleCriticalReadPageCount;
+    uint16_t battleCriticalReadPages[N3DS_ROOM_PREWARM_PAGE_DIAG_CAP];
+    bool battleCriticalReadPagesTruncated;
+    bool battleManifestLoaded;
+    bool battleManifestAttempted;
+    bool battleManifestFound;
+    uint32_t battleManifestPageCount;
+    uint32_t battleManifestColdReads;
+    uint64_t battleManifestReadBytes;
     uint32_t atlasCacheBytesBefore;
     uint32_t atlasCacheBytesAfter;
     uint32_t directCacheBytesBefore;
