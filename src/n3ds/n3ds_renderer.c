@@ -389,6 +389,15 @@ typedef struct N3DSRenderer {
     uint32_t perfWindowSpritePartDrawCalls;
     uint32_t frameSequence;
     const Room* lastPrewarmedRoom;
+    uint32_t battleTransitionPrewarmStage;
+    uint32_t battleTransitionManifestOffset;
+    int32_t battleTransitionRoomIndex;
+    int32_t battleControllerObjectIndex;
+    int32_t battleBlconObjectIndex;
+    int32_t battlerObjectIndex;
+    int32_t battlerStoryObjectIndex;
+    int32_t battleWriterObjectIndex;
+    bool battleTransitionPrewarmSeen;
     N3DSRoomPrewarmPerf lastRoomPrewarmPerf;
     N3DSCachedTextLayout cachedTextLayout;
     N3DSResolvedAssetPathEntry* resolvedAssetPathCache;
@@ -3536,18 +3545,21 @@ static void N3DSRenderer_preloadFontPages(N3DSRenderer* renderer) {
     }
 }
 
-static bool N3DSRenderer_isUndertaleBattleRoom(N3DSRenderer* renderer, Runner* runner) {
-    if (renderer == NULL || runner == NULL || renderer->base.dataWin == NULL) return false;
-    DataWin* dw = renderer->base.dataWin;
+static bool N3DSRenderer_hasLiveExactObject(Runner* runner, int32_t objectIndex) {
+    if (runner == NULL || runner->instancesByExactObject == NULL || runner->dataWin == NULL) return false;
+    if (objectIndex < 0 || (uint32_t) objectIndex >= runner->dataWin->objt.count) return false;
 
-    repeat(arrlen(runner->instances), instanceIndex) {
-        Instance* inst = runner->instances[instanceIndex];
-        if (inst == NULL || inst->destroyed || !inst->active) continue;
-        if (inst->objectIndex < 0 || (uint32_t) inst->objectIndex >= dw->objt.count) continue;
-        const char* objectName = dw->objt.objects[inst->objectIndex].name;
-        if (objectName != NULL && strcmp(objectName, "obj_battlecontroller") == 0) return true;
+    Instance** instances = runner->instancesByExactObject[objectIndex];
+    repeat(arrlen(instances), instanceIndex) {
+        Instance* inst = instances[instanceIndex];
+        if (inst != NULL && !inst->destroyed && inst->active) return true;
     }
     return false;
+}
+
+static bool N3DSRenderer_isUndertaleBattleRoom(N3DSRenderer* renderer, Runner* runner) {
+    if (renderer == NULL || runner == NULL) return false;
+    return N3DSRenderer_hasLiveExactObject(runner, renderer->battleControllerObjectIndex);
 }
 
 static bool N3DSRenderer_objectInheritsNamed(const DataWin* dw, int32_t objectIndex, const char* wantedName) {
@@ -3569,6 +3581,114 @@ static int32_t N3DSRenderer_findSpriteIndexByName(const DataWin* dw, const char*
         if (sprite->name != NULL && strcmp(sprite->name, wantedName) == 0) return (int32_t) spriteIndex;
     }
     return -1;
+}
+
+static int32_t N3DSRenderer_findObjectIndexByName(const DataWin* dw, const char* wantedName) {
+    if (dw == NULL || wantedName == NULL) return -1;
+    repeat(dw->objt.count, objectIndex) {
+        const GameObject* object = &dw->objt.objects[objectIndex];
+        if (object->name != NULL && strcmp(object->name, wantedName) == 0) return (int32_t) objectIndex;
+    }
+    return -1;
+}
+
+static int32_t N3DSRenderer_findFontIndexByName(const DataWin* dw, const char* wantedName) {
+    if (dw == NULL || wantedName == NULL) return -1;
+    repeat(dw->font.count, fontIndex) {
+        const Font* font = &dw->font.fonts[fontIndex];
+        if (font->name != NULL && strcmp(font->name, wantedName) == 0) return (int32_t) fontIndex;
+    }
+    return -1;
+}
+
+static int32_t N3DSRenderer_findRoomIndexByName(const DataWin* dw, const char* wantedName) {
+    if (dw == NULL || wantedName == NULL) return -1;
+    repeat(dw->room.count, roomIndex) {
+        const Room* room = &dw->room.rooms[roomIndex];
+        if (room->name != NULL && strcmp(room->name, wantedName) == 0) return (int32_t) roomIndex;
+    }
+    return -1;
+}
+
+static bool N3DSRenderer_isJapaneseLanguage(Runner* runner) {
+    if (runner == NULL || runner->vmContext == NULL) return false;
+    ptrdiff_t slot = shgeti(runner->vmContext->globalVarNameMap, "language");
+    if (slot < 0) return false;
+    int32_t varID = runner->vmContext->globalVarNameMap[slot].value;
+    if (varID < 0 || (uint32_t) varID >= runner->vmContext->globalVarCount) return false;
+    RValue value = runner->vmContext->globalVars[varID];
+    return value.type == RVALUE_STRING && value.string != NULL && strcmp(value.string, "ja") == 0;
+}
+
+static bool N3DSRenderer_isUndertaleBattleTransition(N3DSRenderer* renderer, Runner* runner) {
+    if (renderer == NULL || runner == NULL) return false;
+    return N3DSRenderer_hasLiveExactObject(runner, renderer->battleBlconObjectIndex) ||
+        N3DSRenderer_hasLiveExactObject(runner, renderer->battlerObjectIndex) ||
+        N3DSRenderer_hasLiveExactObject(runner, renderer->battlerStoryObjectIndex);
+}
+
+static bool N3DSRenderer_prewarmDirectFontBlobByIndex(N3DSRenderer* renderer, int32_t fontIndex) {
+#if !N3DS_ENABLE_DIRECT_ASSETS
+    (void) renderer;
+    (void) fontIndex;
+    return false;
+#else
+    if (renderer == NULL || renderer->base.dataWin == NULL || fontIndex < 0) return false;
+    DataWin* dw = renderer->base.dataWin;
+    if ((uint32_t) fontIndex >= dw->font.count || (uint32_t) fontIndex >= renderer->directFontAssetCount) return false;
+    Font* font = &dw->font.fonts[fontIndex];
+    if (!N3DSRenderer_shouldUseDirectFontAsset(font)) return false;
+    char path[256];
+    snprintf(path, sizeof(path), "fonts/font_%05d.t3x", (int) fontIndex);
+    return N3DSRenderer_ensureDirectTextureBlobLoaded(renderer, &renderer->directFontAssets[fontIndex], path);
+#endif
+}
+
+static bool N3DSRenderer_prewarmDirectFontBlobByName(N3DSRenderer* renderer, const char* wantedName) {
+    if (renderer == NULL || renderer->base.dataWin == NULL) return false;
+    return N3DSRenderer_prewarmDirectFontBlobByIndex(renderer, N3DSRenderer_findFontIndexByName(renderer->base.dataWin, wantedName));
+}
+
+static const char* const kN3DSBattleDirectSpriteNames[] = {
+    "spr_targetchoice",
+    "spr_target",
+    "spr_strike",
+};
+
+static const char* const kN3DSBattleJapaneseCommonFontNames[] = {
+    "fnt_ja_curs",
+    "fnt_ja_main",
+    "fnt_ja_plain",
+};
+
+static void N3DSRenderer_prewarmBattleDirectSpriteBlobByName(N3DSRenderer* renderer, const char* wantedName) {
+#if !N3DS_ENABLE_DIRECT_ASSETS
+    (void) renderer;
+    (void) wantedName;
+#else
+    if (renderer == NULL || renderer->base.dataWin == NULL || wantedName == NULL) return;
+    DataWin* dw = renderer->base.dataWin;
+    int32_t spriteIndex = N3DSRenderer_findSpriteIndexByName(dw, wantedName);
+    if (spriteIndex < 0 || (uint32_t) spriteIndex >= renderer->directSpriteAssetCount) return;
+    N3DSDirectSpriteAsset* spriteAsset = &renderer->directSpriteAssets[spriteIndex];
+    char path[256];
+    snprintf(path, sizeof(path), "sprites/spr_%05lu.t3x", (unsigned long) spriteIndex);
+    (void) N3DSRenderer_ensureDirectTextureBlobLoaded(renderer, &spriteAsset->sheetAsset, path);
+#endif
+}
+
+static void N3DSRenderer_pinBattleDirectSpriteBlobs(N3DSRenderer* renderer) {
+#if !N3DS_ENABLE_DIRECT_ASSETS
+    (void) renderer;
+#else
+    if (renderer == NULL || renderer->base.dataWin == NULL) return;
+    DataWin* dw = renderer->base.dataWin;
+    repeat(sizeof(kN3DSBattleDirectSpriteNames) / sizeof(kN3DSBattleDirectSpriteNames[0]), nameIndex) {
+        int32_t spriteIndex = N3DSRenderer_findSpriteIndexByName(dw, kN3DSBattleDirectSpriteNames[nameIndex]);
+        if (spriteIndex < 0 || (uint32_t) spriteIndex >= renderer->directSpriteAssetCount) continue;
+        renderer->directSpriteAssets[spriteIndex].sheetAsset.pinned = true;
+    }
+#endif
 }
 
 static void N3DSRenderer_prewarmSpriteAllFramesBlobOnly(
@@ -3615,6 +3735,53 @@ static bool N3DSRenderer_tryGetInstanceIntSelfVar(
     if (!isfinite(number) || number < (double) INT32_MIN || number > (double) INT32_MAX) return false;
     *outValue = (int32_t) number;
     return true;
+}
+
+static void N3DSRenderer_prewarmLiveJapaneseDirectFontBlobs(N3DSRenderer* renderer, Runner* runner) {
+    if (renderer == NULL || runner == NULL || renderer->base.dataWin == NULL) return;
+    DataWin* dw = renderer->base.dataWin;
+
+    (void) N3DSRenderer_prewarmDirectFontBlobByIndex(renderer, renderer->base.drawFont);
+
+    // instancesByObject is descendant-inclusive, so the base writer bucket covers
+    // OBJ_WRITER/OBJ_INSTAWRITER/OBJ_NOMSCWRITER without scanning dust or bullets.
+    int32_t writerObjectIndex = renderer->battleWriterObjectIndex;
+    if (runner->instancesByObject == NULL ||
+        writerObjectIndex < 0 ||
+        (uint32_t) writerObjectIndex >= dw->objt.count) {
+        return;
+    }
+
+    Instance** writers = runner->instancesByObject[writerObjectIndex];
+    repeat(arrlen(writers), writerIndex) {
+        Instance* inst = writers[writerIndex];
+        if (inst == NULL || inst->destroyed || !inst->active) continue;
+
+        int32_t fontIndex = -1;
+        if (!N3DSRenderer_tryGetInstanceIntSelfVar(runner, inst, "myfont", &fontIndex)) continue;
+        if (fontIndex < 0 || (uint32_t) fontIndex >= dw->font.count) continue;
+        (void) N3DSRenderer_prewarmDirectFontBlobByIndex(renderer, fontIndex);
+    }
+}
+
+static bool N3DSRenderer_prewarmBattleRoomManifestNextBlob(N3DSRenderer* renderer) {
+    if (renderer == NULL || renderer->base.dataWin == NULL || renderer->roomManifestEntries == NULL) return false;
+    if (renderer->battleTransitionRoomIndex < 0) {
+        renderer->battleTransitionRoomIndex = N3DSRenderer_findRoomIndexByName(renderer->base.dataWin, "room_battle");
+    }
+    if (renderer->battleTransitionRoomIndex < 0) return false;
+    const N3DSRoomManifestEntry* entry = N3DSRenderer_findRoomManifestEntry(renderer, (uint32_t) renderer->battleTransitionRoomIndex);
+    if (entry == NULL || entry->pageCount == 0) return false;
+    if (entry->pageStart > renderer->roomManifestPageRefCount) return false;
+    if (entry->pageCount > renderer->roomManifestPageRefCount - entry->pageStart) return false;
+    while (renderer->battleTransitionManifestOffset < entry->pageCount) {
+        uint32_t refIndex = entry->pageStart + renderer->battleTransitionManifestOffset++;
+        uint16_t pageIndex = renderer->roomManifestPageRefs[refIndex].pageIndex;
+        if ((uint32_t) pageIndex >= renderer->atlasPageCount) continue;
+        (void) N3DSRenderer_ensurePageBlobLoaded(renderer, (uint32_t) pageIndex);
+        return true;
+    }
+    return false;
 }
 
 static void N3DSRenderer_prewarmBattleCriticalAtlasBlobs(N3DSRenderer* renderer, Runner* runner) {
@@ -3762,83 +3929,69 @@ done:
 }
 
 static void N3DSRenderer_prewarmBattleDirectSpriteBlobs(N3DSRenderer* renderer) {
-#if !N3DS_ENABLE_DIRECT_ASSETS
-    (void) renderer;
-    return;
-#else
-    if (renderer == NULL || renderer->base.dataWin == NULL) return;
-
-    static const char* const kBattleSpriteNames[] = {
-        "spr_targetchoice",
-        "spr_target",
-        "spr_strike",
-    };
-
-    DataWin* dw = renderer->base.dataWin;
-    repeat(sizeof(kBattleSpriteNames) / sizeof(kBattleSpriteNames[0]), nameIndex) {
-        const char* wantedName = kBattleSpriteNames[nameIndex];
-        repeat(dw->sprt.count, spriteIndex) {
-            Sprite* sprite = &dw->sprt.sprites[spriteIndex];
-            if (sprite->name == NULL || strcmp(sprite->name, wantedName) != 0) continue;
-            if ((uint32_t) spriteIndex >= renderer->directSpriteAssetCount) break;
-
-            N3DSDirectSpriteAsset* spriteAsset = &renderer->directSpriteAssets[spriteIndex];
-            char path[256];
-            snprintf(path, sizeof(path), "sprites/spr_%05lu.t3x", (unsigned long) spriteIndex);
-            (void) N3DSRenderer_ensureDirectTextureBlobLoaded(renderer, &spriteAsset->sheetAsset, path);
-            break;
-        }
+    repeat(sizeof(kN3DSBattleDirectSpriteNames) / sizeof(kN3DSBattleDirectSpriteNames[0]), nameIndex) {
+        N3DSRenderer_prewarmBattleDirectSpriteBlobByName(renderer, kN3DSBattleDirectSpriteNames[nameIndex]);
     }
-#endif
 }
 
-static void N3DSRenderer_prewarmJapaneseDirectFontBlobs(N3DSRenderer* renderer) {
-#if !N3DS_ENABLE_DIRECT_ASSETS
-    (void) renderer;
-    return;
-#else
-    if (renderer == NULL || renderer->base.dataWin == NULL) return;
+static void N3DSRenderer_prewarmJapaneseDirectFontBlobs(N3DSRenderer* renderer, Runner* runner) {
+    if (renderer == NULL || runner == NULL || renderer->base.dataWin == NULL) return;
+    if (N3DSRenderer_isJapaneseLanguage(runner)) {
+        repeat(sizeof(kN3DSBattleJapaneseCommonFontNames) / sizeof(kN3DSBattleJapaneseCommonFontNames[0]), nameIndex) {
+            (void) N3DSRenderer_prewarmDirectFontBlobByName(renderer, kN3DSBattleJapaneseCommonFontNames[nameIndex]);
+        }
+    }
+    N3DSRenderer_prewarmLiveJapaneseDirectFontBlobs(renderer, runner);
+}
 
-    DataWin* dw = renderer->base.dataWin;
-    int32_t currentFont = renderer->base.drawFont;
+bool N3DSRenderer_tickBattlePrewarm(Renderer* base, Runner* runner) {
+    if (base == NULL || runner == NULL || runner->currentRoom == NULL) return false;
+    N3DSRenderer* renderer = (N3DSRenderer*) base;
 
-    // Refresh the currently selected Japanese font first, then warm the remaining
-    // Japanese direct-font blobs. Only compressed .t3x data is loaded here; GPU
-    // texture creation remains lazy and the 3 MiB direct VRAM budget is unchanged.
-    if (currentFont >= 0 &&
-        (uint32_t) currentFont < dw->font.count &&
-        (uint32_t) currentFont < renderer->directFontAssetCount) {
-        Font* font = &dw->font.fonts[currentFont];
-        if (font->name != NULL && strncmp(font->name, "fnt_ja_", 7) == 0) {
-            char path[256];
-            snprintf(path, sizeof(path), "fonts/font_%05d.t3x", (int) currentFont);
-            (void) N3DSRenderer_ensureDirectTextureBlobLoaded(renderer, &renderer->directFontAssets[currentFont], path);
+    if (N3DSRenderer_isUndertaleBattleRoom(renderer, runner)) {
+        N3DSRenderer_prewarmLiveJapaneseDirectFontBlobs(renderer, runner);
+        return false;
+    }
+
+    if (!N3DSRenderer_isUndertaleBattleTransition(renderer, runner)) {
+        renderer->battleTransitionPrewarmSeen = false;
+        renderer->battleTransitionPrewarmStage = 0;
+        renderer->battleTransitionManifestOffset = 0;
+        return false;
+    }
+
+    if (!renderer->battleTransitionPrewarmSeen) {
+        renderer->battleTransitionPrewarmSeen = true;
+        renderer->battleTransitionPrewarmStage = 0;
+        renderer->battleTransitionManifestOffset = 0;
+    }
+
+    if (renderer->battleTransitionPrewarmStage == UINT32_MAX) return true;
+
+    const uint32_t spriteStageCount = (uint32_t) (sizeof(kN3DSBattleDirectSpriteNames) / sizeof(kN3DSBattleDirectSpriteNames[0]));
+    const uint32_t fontStageCount = (uint32_t) (sizeof(kN3DSBattleJapaneseCommonFontNames) / sizeof(kN3DSBattleJapaneseCommonFontNames[0]));
+
+    if (renderer->battleTransitionPrewarmStage < spriteStageCount) {
+        N3DSRenderer_prewarmBattleDirectSpriteBlobByName(renderer, kN3DSBattleDirectSpriteNames[renderer->battleTransitionPrewarmStage]);
+        renderer->battleTransitionPrewarmStage++;
+        return true;
+    }
+
+    if (renderer->battleTransitionPrewarmStage < spriteStageCount + fontStageCount) {
+        if (!N3DSRenderer_isJapaneseLanguage(runner)) {
+            renderer->battleTransitionPrewarmStage = spriteStageCount + fontStageCount;
+        } else {
+            uint32_t fontStage = renderer->battleTransitionPrewarmStage - spriteStageCount;
+            (void) N3DSRenderer_prewarmDirectFontBlobByName(renderer, kN3DSBattleJapaneseCommonFontNames[fontStage]);
+            renderer->battleTransitionPrewarmStage++;
+            return true;
         }
     }
 
-    repeat(dw->font.count, fontIndex) {
-        if ((int32_t) fontIndex == currentFont || (uint32_t) fontIndex >= renderer->directFontAssetCount) continue;
-        Font* font = &dw->font.fonts[fontIndex];
-        if (font->name == NULL || strncmp(font->name, "fnt_ja_", 7) != 0) continue;
-
-        char path[256];
-        snprintf(path, sizeof(path), "fonts/font_%05lu.t3x", (unsigned long) fontIndex);
-        (void) N3DSRenderer_ensureDirectTextureBlobLoaded(renderer, &renderer->directFontAssets[fontIndex], path);
+    if (!N3DSRenderer_prewarmBattleRoomManifestNextBlob(renderer)) {
+        renderer->battleTransitionPrewarmStage = UINT32_MAX;
     }
-
-    // If warming the family had to recycle cache entries, touch the current font
-    // once more so the active dialogue font remains the newest preferred blob.
-    if (currentFont >= 0 &&
-        (uint32_t) currentFont < dw->font.count &&
-        (uint32_t) currentFont < renderer->directFontAssetCount) {
-        Font* font = &dw->font.fonts[currentFont];
-        if (font->name != NULL && strncmp(font->name, "fnt_ja_", 7) == 0) {
-            char path[256];
-            snprintf(path, sizeof(path), "fonts/font_%05d.t3x", (int) currentFont);
-            (void) N3DSRenderer_ensureDirectTextureBlobLoaded(renderer, &renderer->directFontAssets[currentFont], path);
-        }
-    }
-#endif
+    return true;
 }
 
 static void N3DSRenderer_prewarmRoom(Renderer* base, Runner* runner) {
@@ -3860,6 +4013,9 @@ static void N3DSRenderer_prewarmRoom(Renderer* base, Runner* runner) {
 
     u64 phaseStartTick = svcGetSystemTick();
     N3DSRenderer_clearDirectAssetPins(renderer);
+    if (battleRoom) {
+        N3DSRenderer_pinBattleDirectSpriteBlobs(renderer);
+    }
     perf.clearPinsMs = N3DSRenderer_ticksToMs(svcGetSystemTick() - phaseStartTick);
 
     phaseStartTick = svcGetSystemTick();
@@ -3889,7 +4045,7 @@ static void N3DSRenderer_prewarmRoom(Renderer* base, Runner* runner) {
     bytesBefore = renderer->totalDirectBlobReadBytes;
     phaseStartTick = svcGetSystemTick();
     if (battleRoom) {
-        N3DSRenderer_prewarmJapaneseDirectFontBlobs(renderer);
+        N3DSRenderer_prewarmJapaneseDirectFontBlobs(renderer, runner);
     }
     perf.japaneseFontsMs = N3DSRenderer_ticksToMs(svcGetSystemTick() - phaseStartTick);
     perf.japaneseFontReads = (uint32_t) (renderer->totalDirectBlobReads - readsBefore);
@@ -3929,6 +4085,12 @@ static void N3DSRenderer_init(Renderer* base, DataWin* dataWin) {
     bool isNew3DS = false;
     base->dataWin = dataWin;
     renderer->baseTPAGCount = dataWin != NULL ? dataWin->tpag.count : 0u;
+    renderer->battleTransitionRoomIndex = -1;
+    renderer->battleControllerObjectIndex = N3DSRenderer_findObjectIndexByName(dataWin, "obj_battlecontroller");
+    renderer->battleBlconObjectIndex = N3DSRenderer_findObjectIndexByName(dataWin, "obj_battleblcon");
+    renderer->battlerObjectIndex = N3DSRenderer_findObjectIndexByName(dataWin, "obj_battler");
+    renderer->battlerStoryObjectIndex = N3DSRenderer_findObjectIndexByName(dataWin, "obj_battlerstory");
+    renderer->battleWriterObjectIndex = N3DSRenderer_findObjectIndexByName(dataWin, "obj_base_writer");
     renderer->topTarget = C2D_CreateScreenTarget(GFX_TOP, GFX_LEFT);
 #ifndef N3DS_DISABLE_BOTTOM_SCREEN
     renderer->bottomTarget = C2D_CreateScreenTarget(GFX_BOTTOM, GFX_LEFT);
