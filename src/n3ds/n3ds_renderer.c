@@ -65,11 +65,9 @@
 #define N3DS_MAX_CACHED_T3X_BYTES_NEW3DS (24u * 1024u * 1024u)
 #define N3DS_MAX_CACHED_DIRECT_T3X_BYTES_OLD3DS (4u * 1024u * 1024u)
 #define N3DS_MAX_CACHED_DIRECT_T3X_BYTES_NEW3DS (8u * 1024u * 1024u)
-#define N3DS_BATTLE_DIRECT_PREFETCH_WORKER_CHUNK_BYTES (256u * 1024u)
-#define N3DS_BATTLE_DIRECT_PREFETCH_WORKER_STACK_SIZE (32u * 1024u)
-#define N3DS_BATTLE_DIRECT_PREFETCH_WORKER_PRIORITY 0x35
-#define N3DS_BATTLE_DIRECT_PREFETCH_WORKER_CORE_ID 1
-#define N3DS_BATTLE_DIRECT_PREFETCH_WORKER_CPU_LIMIT 20u
+#define N3DS_BATTLE_DIRECT_PREFETCH_CHUNK_BYTES (32u * 1024u)
+#define N3DS_BATTLE_DIRECT_PREFETCH_MAX_CHUNKS_PER_TICK 3u
+#define N3DS_BATTLE_DIRECT_PREFETCH_BUDGET_MS 10.0
 #define N3DS_DIRECT_ASSET_VRAM_BUDGET_OLD3DS (1024u * 1024u)
 #define N3DS_DIRECT_ASSET_VRAM_BUDGET_NEW3DS (3072u * 1024u)
 // battle screen offset
@@ -280,23 +278,16 @@ typedef struct {
     uint32_t dataOffset;
     uint32_t dataSize;
     uint32_t bytesRead;
-    uint32_t chunksRead;
-    uint32_t reportedBytes;
-    uint32_t reportedChunks;
-    uint32_t generation;
     bool active;
-    bool requested;
-    bool inProgress;
-    bool ready;
-    bool success;
 } N3DSDirectPrefetchJob;
 
 typedef struct {
+    u64 startTick;
     uint32_t chunksRead;
     uint32_t bytesRead;
     uint32_t lastBytesCompleted;
     uint32_t lastBytesTotal;
-} N3DSDirectPrefetchTickProgress;
+} N3DSDirectPrefetchTickBudget;
 
 typedef enum {
     N3DS_DIRECT_PREFETCH_PENDING = 0,
@@ -439,13 +430,6 @@ typedef struct N3DSRenderer {
     int32_t battleWriterObjectIndex;
     bool battleTransitionPrewarmSeen;
     N3DSDirectPrefetchJob battleDirectPrefetch;
-    LightLock directPrefetchLock;
-    CondVar directPrefetchCond;
-    LightEvent directPrefetchEvent;
-    Thread directPrefetchThread;
-    uint32_t directPrefetchGeneration;
-    bool directPrefetchWorkerStop;
-    bool directPrefetchWorkerEnabled;
     N3DSBattlePrewarmTickDiag lastBattlePrewarmTickDiag;
     bool battleTransitionManifestLoaded;
     bool battleTransitionManifestAttempted;
@@ -464,7 +448,6 @@ typedef struct N3DSRenderer {
     FILE* atlasTraceFile;
     FILE* packedAtlasFile;
     FILE* packedDirectAssetFile;
-    FILE* packedDirectPrefetchFile;
     uint32_t roomManifestEntryCount;
     uint32_t roomManifestPageRefCount;
     uint32_t roomManifestRoomCount;
@@ -1405,10 +1388,6 @@ static bool N3DSRenderer_loadPackedDirectAssets(N3DSRenderer* renderer) {
     }
 
     renderer->packedDirectAssetFile = file;
-    renderer->packedDirectPrefetchFile = fopen(resolvedPath, "rb");
-    if (renderer->packedDirectPrefetchFile != NULL) {
-        N3DSRenderer_configureFileBuffer(renderer->packedDirectPrefetchFile);
-    }
     fprintf(stderr, "N3DS: loaded packed direct texture blob (%u entries)\n", (unsigned int) entryCount);
     return true;
 }
@@ -1989,244 +1968,25 @@ static bool N3DSRenderer_evictLRUDirectAssetBlob(N3DSRenderer* renderer, const N
     return true;
 }
 
-static void N3DSRenderer_accountDirectPrefetchProgressLocked(
-    N3DSRenderer* renderer,
-    N3DSDirectPrefetchTickProgress* progress
-) {
-    if (renderer == NULL) return;
-    N3DSDirectPrefetchJob* job = &renderer->battleDirectPrefetch;
-    uint32_t byteDelta = job->bytesRead >= job->reportedBytes ? job->bytesRead - job->reportedBytes : 0;
-    uint32_t chunkDelta = job->chunksRead >= job->reportedChunks ? job->chunksRead - job->reportedChunks : 0;
-    if (byteDelta > 0) renderer->totalDirectBlobReadBytes += (uint64_t) byteDelta;
-    job->reportedBytes = job->bytesRead;
-    job->reportedChunks = job->chunksRead;
-    if (progress != NULL) {
-        progress->bytesRead += byteDelta;
-        progress->chunksRead += chunkDelta;
-        progress->lastBytesCompleted = job->bytesRead;
-        progress->lastBytesTotal = job->dataSize;
-    }
-}
-
-static bool N3DSRenderer_directPrefetchIsActive(N3DSRenderer* renderer) {
-    if (renderer == NULL) return false;
-    LightLock_Lock(&renderer->directPrefetchLock);
-    bool active = renderer->battleDirectPrefetch.active;
-    LightLock_Unlock(&renderer->directPrefetchLock);
-    return active;
-}
-
-static bool N3DSRenderer_directPrefetchTargetsAsset(N3DSRenderer* renderer, const N3DSDirectTextureAsset* asset) {
-    if (renderer == NULL || asset == NULL) return false;
-    LightLock_Lock(&renderer->directPrefetchLock);
-    bool matches = renderer->battleDirectPrefetch.active && renderer->battleDirectPrefetch.asset == asset;
-    LightLock_Unlock(&renderer->directPrefetchLock);
-    return matches;
-}
-
-static void N3DSRenderer_getDirectPrefetchProgress(
-    N3DSRenderer* renderer,
-    uint32_t* outBytesCompleted,
-    uint32_t* outBytesTotal
-) {
-    if (outBytesCompleted != NULL) *outBytesCompleted = 0;
-    if (outBytesTotal != NULL) *outBytesTotal = 0;
-    if (renderer == NULL) return;
-    LightLock_Lock(&renderer->directPrefetchLock);
-    N3DSDirectPrefetchJob* job = &renderer->battleDirectPrefetch;
-    if (job->active) {
-        if (outBytesCompleted != NULL) *outBytesCompleted = job->bytesRead;
-        if (outBytesTotal != NULL) *outBytesTotal = job->dataSize;
-    }
-    LightLock_Unlock(&renderer->directPrefetchLock);
-}
-
-static void N3DSRenderer_directPrefetchWorkerMain(void* arg) {
-    N3DSRenderer* renderer = (N3DSRenderer*) arg;
-    if (renderer == NULL) threadExit(0);
-
-    while (true) {
-        LightEvent_Wait(&renderer->directPrefetchEvent);
-
-        while (true) {
-            uint32_t generation = 0;
-            uint32_t dataOffset = 0;
-            uint32_t dataSize = 0;
-
-            LightLock_Lock(&renderer->directPrefetchLock);
-            if (renderer->directPrefetchWorkerStop) {
-                LightLock_Unlock(&renderer->directPrefetchLock);
-                threadExit(0);
-            }
-
-            N3DSDirectPrefetchJob* job = &renderer->battleDirectPrefetch;
-            if (!job->active || !job->requested || job->inProgress || job->ready) {
-                LightLock_Unlock(&renderer->directPrefetchLock);
-                break;
-            }
-
-            generation = job->generation;
-            dataOffset = job->dataOffset;
-            dataSize = job->dataSize;
-            job->requested = false;
-            job->inProgress = true;
-            LightLock_Unlock(&renderer->directPrefetchLock);
-
-            uint8_t* data = malloc((size_t) dataSize);
-            uint32_t bytesRead = 0;
-            uint32_t chunksRead = 0;
-            bool success = data != NULL && renderer->packedDirectPrefetchFile != NULL;
-            if (success) {
-                if ((uint64_t) dataOffset > (uint64_t) LONG_MAX ||
-                    fseek(renderer->packedDirectPrefetchFile, (long) dataOffset, SEEK_SET) != 0) {
-                    clearerr(renderer->packedDirectPrefetchFile);
-                    success = false;
-                }
-            }
-
-            while (success && bytesRead < dataSize) {
-                uint32_t remaining = dataSize - bytesRead;
-                uint32_t chunkSize = remaining < N3DS_BATTLE_DIRECT_PREFETCH_WORKER_CHUNK_BYTES ?
-                    remaining : N3DS_BATTLE_DIRECT_PREFETCH_WORKER_CHUNK_BYTES;
-                size_t got = fread(data + bytesRead, 1, (size_t) chunkSize, renderer->packedDirectPrefetchFile);
-                if (got != (size_t) chunkSize) {
-                    clearerr(renderer->packedDirectPrefetchFile);
-                    success = false;
-                    break;
-                }
-                bytesRead += chunkSize;
-                chunksRead++;
-
-                LightLock_Lock(&renderer->directPrefetchLock);
-                job = &renderer->battleDirectPrefetch;
-                bool current =
-                    job->active &&
-                    job->inProgress &&
-                    job->generation == generation &&
-                    !renderer->directPrefetchWorkerStop;
-                if (current) {
-                    job->bytesRead = bytesRead;
-                    job->chunksRead = chunksRead;
-                }
-                bool shouldStop = renderer->directPrefetchWorkerStop;
-                LightLock_Unlock(&renderer->directPrefetchLock);
-                if (!current || shouldStop) {
-                    success = false;
-                    break;
-                }
-            }
-
-            LightLock_Lock(&renderer->directPrefetchLock);
-            job = &renderer->battleDirectPrefetch;
-            bool current =
-                job->active &&
-                job->inProgress &&
-                job->generation == generation;
-            if (current) {
-                job->bytesRead = bytesRead;
-                job->chunksRead = chunksRead;
-                job->inProgress = false;
-                job->ready = true;
-                job->success = success && bytesRead == dataSize;
-                if (job->success) {
-                    job->data = data;
-                    data = NULL;
-                }
-                CondVar_Broadcast(&renderer->directPrefetchCond);
-            }
-            bool shouldStop = renderer->directPrefetchWorkerStop;
-            LightLock_Unlock(&renderer->directPrefetchLock);
-
-            free(data);
-            if (shouldStop) threadExit(0);
-        }
-    }
-}
-
-static void N3DSRenderer_startDirectPrefetchWorker(N3DSRenderer* renderer) {
-    if (renderer == NULL || renderer->directPrefetchWorkerEnabled ||
-        renderer->packedDirectPrefetchFile == NULL) {
-        return;
-    }
-
-    renderer->directPrefetchWorkerStop = false;
-    (void) APT_SetAppCpuTimeLimit(N3DS_BATTLE_DIRECT_PREFETCH_WORKER_CPU_LIMIT);
-    renderer->directPrefetchThread = threadCreate(
-        N3DSRenderer_directPrefetchWorkerMain,
-        renderer,
-        N3DS_BATTLE_DIRECT_PREFETCH_WORKER_STACK_SIZE,
-        N3DS_BATTLE_DIRECT_PREFETCH_WORKER_PRIORITY,
-        N3DS_BATTLE_DIRECT_PREFETCH_WORKER_CORE_ID,
-        false
-    );
-    renderer->directPrefetchWorkerEnabled = renderer->directPrefetchThread != NULL;
-}
-
-static void N3DSRenderer_stopDirectPrefetchWorker(N3DSRenderer* renderer) {
-    if (renderer == NULL || !renderer->directPrefetchWorkerEnabled) return;
-
-    LightLock_Lock(&renderer->directPrefetchLock);
-    renderer->directPrefetchWorkerStop = true;
-    renderer->directPrefetchGeneration++;
-    renderer->battleDirectPrefetch.generation = renderer->directPrefetchGeneration;
-    CondVar_Broadcast(&renderer->directPrefetchCond);
-    LightLock_Unlock(&renderer->directPrefetchLock);
-    LightEvent_Signal(&renderer->directPrefetchEvent);
-
-    threadJoin(renderer->directPrefetchThread, U64_MAX);
-    threadFree(renderer->directPrefetchThread);
-    renderer->directPrefetchThread = NULL;
-    renderer->directPrefetchWorkerEnabled = false;
-}
-
 static void N3DSRenderer_cancelDirectPrefetchJob(N3DSRenderer* renderer) {
     if (renderer == NULL) return;
-
-    uint8_t* data = NULL;
-    uint32_t dataSize = 0;
-    LightLock_Lock(&renderer->directPrefetchLock);
     N3DSDirectPrefetchJob* job = &renderer->battleDirectPrefetch;
-    N3DSRenderer_accountDirectPrefetchProgressLocked(renderer, NULL);
-    if (job->active) dataSize = job->dataSize;
-    data = job->data;
-    renderer->directPrefetchGeneration++;
-    memset(job, 0, sizeof(*job));
-    CondVar_Broadcast(&renderer->directPrefetchCond);
-    LightLock_Unlock(&renderer->directPrefetchLock);
-
-    free(data);
-    if (renderer->directPrefetchReservedBytes >= dataSize) renderer->directPrefetchReservedBytes -= dataSize;
+    if (job->data != NULL) free(job->data);
+    if (renderer->directPrefetchReservedBytes >= job->dataSize) renderer->directPrefetchReservedBytes -= job->dataSize;
     else renderer->directPrefetchReservedBytes = 0;
+    memset(job, 0, sizeof(*job));
 }
 
 static bool N3DSRenderer_publishDirectPrefetchJob(N3DSRenderer* renderer) {
     if (renderer == NULL) return false;
-
-    N3DSDirectTextureAsset* asset = NULL;
-    uint8_t* data = NULL;
-    uint32_t dataSize = 0;
-    bool success = false;
-
-    LightLock_Lock(&renderer->directPrefetchLock);
     N3DSDirectPrefetchJob* job = &renderer->battleDirectPrefetch;
-    if (job->active && job->ready) {
-        N3DSRenderer_accountDirectPrefetchProgressLocked(renderer, NULL);
-        asset = job->asset;
-        data = job->data;
-        dataSize = job->dataSize;
-        success = job->success && data != NULL && dataSize > 0 && job->bytesRead == dataSize;
-        job->data = NULL;
-        renderer->directPrefetchGeneration++;
-        memset(job, 0, sizeof(*job));
-    }
-    LightLock_Unlock(&renderer->directPrefetchLock);
+    if (!job->active || job->asset == NULL || job->data == NULL || job->dataSize == 0 || job->bytesRead != job->dataSize) return false;
 
-    if (asset == NULL) return false;
-    if (renderer->directPrefetchReservedBytes >= dataSize) renderer->directPrefetchReservedBytes -= dataSize;
-    else renderer->directPrefetchReservedBytes = 0;
-
+    N3DSDirectTextureAsset* asset = job->asset;
+    uint8_t* data = job->data;
+    uint32_t dataSize = job->dataSize;
     bool published = false;
-    if (success && (asset->blobData == NULL || asset->blobSize == 0)) {
+    if (asset->blobData == NULL || asset->blobSize == 0) {
         asset->blobData = data;
         asset->blobSize = dataSize;
         asset->blobLastUsedStamp = ++renderer->directBlobUseCounter;
@@ -2236,21 +1996,18 @@ static bool N3DSRenderer_publishDirectPrefetchJob(N3DSRenderer* renderer) {
         published = true;
         data = NULL;
     }
-    free(data);
+    if (data != NULL) free(data);
+    if (renderer->directPrefetchReservedBytes >= dataSize) renderer->directPrefetchReservedBytes -= dataSize;
+    else renderer->directPrefetchReservedBytes = 0;
+    memset(job, 0, sizeof(*job));
     return published || (asset->blobData != NULL && asset->blobSize > 0);
 }
 
 static bool N3DSRenderer_beginPackedDirectPrefetch(N3DSRenderer* renderer, N3DSDirectTextureAsset* asset, const char* relativePath) {
     if (renderer == NULL || asset == NULL || relativePath == NULL) return false;
     if (asset->blobData != NULL && asset->blobSize > 0) return true;
-    if (!renderer->directPrefetchWorkerEnabled ||
-        renderer->packedDirectPrefetchFile == NULL ||
-        renderer->packedDirectAssetMap == NULL) {
-        return false;
-    }
-    if (N3DSRenderer_directPrefetchIsActive(renderer)) {
-        return N3DSRenderer_directPrefetchTargetsAsset(renderer, asset);
-    }
+    if (renderer->battleDirectPrefetch.active) return renderer->battleDirectPrefetch.asset == asset;
+    if (renderer->packedDirectAssetFile == NULL || renderer->packedDirectAssetMap == NULL) return false;
 
     ptrdiff_t mapIndex = shgeti(renderer->packedDirectAssetMap, relativePath);
     if (mapIndex < 0) return false;
@@ -2262,78 +2019,88 @@ static bool N3DSRenderer_beginPackedDirectPrefetch(N3DSRenderer* renderer, N3DSD
         (uint64_t) entry.dataSize > (uint64_t) renderer->cachedDirectT3xByteLimit) {
         if (!N3DSRenderer_evictLRUDirectAssetBlob(renderer, asset)) break;
     }
+    uint8_t* data = safeMalloc((size_t) entry.dataSize);
+    if (data == NULL) return false;
 
-    LightLock_Lock(&renderer->directPrefetchLock);
     N3DSDirectPrefetchJob* job = &renderer->battleDirectPrefetch;
-    if (job->active) {
-        bool matches = job->asset == asset;
-        LightLock_Unlock(&renderer->directPrefetchLock);
-        return matches;
-    }
-    renderer->directPrefetchGeneration++;
     job->asset = asset;
+    job->data = data;
     job->dataOffset = entry.dataOffset;
     job->dataSize = entry.dataSize;
-    job->generation = renderer->directPrefetchGeneration;
+    job->bytesRead = 0;
     job->active = true;
-    job->requested = true;
     renderer->directPrefetchReservedBytes += entry.dataSize;
-    LightLock_Unlock(&renderer->directPrefetchLock);
-    LightEvent_Signal(&renderer->directPrefetchEvent);
+    clearerr(renderer->packedDirectAssetFile);
     return true;
+}
+
+static bool N3DSRenderer_directPrefetchBudgetExhausted(const N3DSDirectPrefetchTickBudget* budget) {
+    if (budget == NULL) return false;
+    if (budget->chunksRead >= N3DS_BATTLE_DIRECT_PREFETCH_MAX_CHUNKS_PER_TICK) return true;
+    return N3DSRenderer_ticksToMs(svcGetSystemTick() - budget->startTick) >= N3DS_BATTLE_DIRECT_PREFETCH_BUDGET_MS;
 }
 
 static N3DSDirectPrefetchStatus N3DSRenderer_tickDirectPrefetchJob(
     N3DSRenderer* renderer,
     bool drain,
-    N3DSDirectPrefetchTickProgress* progress
+    N3DSDirectPrefetchTickBudget* budget
 ) {
-    if (renderer == NULL) return N3DS_DIRECT_PREFETCH_COMPLETE;
+    if (renderer == NULL || !renderer->battleDirectPrefetch.active) return N3DS_DIRECT_PREFETCH_COMPLETE;
 
-    while (true) {
-        LightLock_Lock(&renderer->directPrefetchLock);
-        N3DSDirectPrefetchJob* job = &renderer->battleDirectPrefetch;
-        if (!job->active) {
-            LightLock_Unlock(&renderer->directPrefetchLock);
-            return N3DS_DIRECT_PREFETCH_COMPLETE;
+    N3DSDirectPrefetchTickBudget localBudget;
+    if (!drain && budget == NULL) {
+        memset(&localBudget, 0, sizeof(localBudget));
+        localBudget.startTick = svcGetSystemTick();
+        budget = &localBudget;
+    }
+
+    N3DSDirectPrefetchJob* job = &renderer->battleDirectPrefetch;
+    while (job->active) {
+        if (job->bytesRead >= job->dataSize) {
+            return N3DSRenderer_publishDirectPrefetchJob(renderer) ? N3DS_DIRECT_PREFETCH_COMPLETE : N3DS_DIRECT_PREFETCH_FAILED;
         }
+        if (!drain && N3DSRenderer_directPrefetchBudgetExhausted(budget)) return N3DS_DIRECT_PREFETCH_PENDING;
 
-        N3DSRenderer_accountDirectPrefetchProgressLocked(renderer, progress);
-        if (job->ready) {
-            bool success = job->success;
-            LightLock_Unlock(&renderer->directPrefetchLock);
-            if (!success) {
-                N3DSRenderer_cancelDirectPrefetchJob(renderer);
-                return N3DS_DIRECT_PREFETCH_FAILED;
-            }
-            return N3DSRenderer_publishDirectPrefetchJob(renderer) ?
-                N3DS_DIRECT_PREFETCH_COMPLETE : N3DS_DIRECT_PREFETCH_FAILED;
+        uint32_t remaining = job->dataSize - job->bytesRead;
+        uint32_t chunkSize = remaining < N3DS_BATTLE_DIRECT_PREFETCH_CHUNK_BYTES ? remaining : N3DS_BATTLE_DIRECT_PREFETCH_CHUNK_BYTES;
+        uint64_t absoluteOffset = (uint64_t) job->dataOffset + (uint64_t) job->bytesRead;
+        if (absoluteOffset > (uint64_t) LONG_MAX || fseek(renderer->packedDirectAssetFile, (long) absoluteOffset, SEEK_SET) != 0) {
+            clearerr(renderer->packedDirectAssetFile);
+            N3DSRenderer_cancelDirectPrefetchJob(renderer);
+            return N3DS_DIRECT_PREFETCH_FAILED;
         }
-
-        if (!drain) {
-            LightLock_Unlock(&renderer->directPrefetchLock);
-            return N3DS_DIRECT_PREFETCH_PENDING;
-        }
-
-        if (!renderer->directPrefetchWorkerEnabled || (!job->requested && !job->inProgress)) {
-            LightLock_Unlock(&renderer->directPrefetchLock);
+        size_t got = fread(job->data + job->bytesRead, 1, (size_t) chunkSize, renderer->packedDirectAssetFile);
+        if (got != (size_t) chunkSize) {
+            clearerr(renderer->packedDirectAssetFile);
             N3DSRenderer_cancelDirectPrefetchJob(renderer);
             return N3DS_DIRECT_PREFETCH_FAILED;
         }
 
-        CondVar_Wait(&renderer->directPrefetchCond, &renderer->directPrefetchLock);
-        LightLock_Unlock(&renderer->directPrefetchLock);
+        job->bytesRead += chunkSize;
+        renderer->totalDirectBlobReadBytes += (uint64_t) chunkSize;
+        if (budget != NULL) {
+            budget->chunksRead++;
+            budget->bytesRead += chunkSize;
+            budget->lastBytesCompleted = job->bytesRead;
+            budget->lastBytesTotal = job->dataSize;
+        }
+
+        if (job->bytesRead == job->dataSize) {
+            return N3DSRenderer_publishDirectPrefetchJob(renderer) ? N3DS_DIRECT_PREFETCH_COMPLETE : N3DS_DIRECT_PREFETCH_FAILED;
+        }
+        if (!drain && N3DSRenderer_directPrefetchBudgetExhausted(budget)) return N3DS_DIRECT_PREFETCH_PENDING;
     }
+    return N3DS_DIRECT_PREFETCH_COMPLETE;
 }
 
 static bool N3DSRenderer_ensureDirectTextureBlobLoaded(N3DSRenderer* renderer, N3DSDirectTextureAsset* asset, const char* relativePath) {
     if (renderer == NULL || asset == NULL || relativePath == NULL) return false;
     if (asset->blobData != NULL && asset->blobSize > 0) {
-        if (N3DSRenderer_directPrefetchTargetsAsset(renderer, asset)) N3DSRenderer_cancelDirectPrefetchJob(renderer);
+        if (renderer->battleDirectPrefetch.active && renderer->battleDirectPrefetch.asset == asset) N3DSRenderer_cancelDirectPrefetchJob(renderer);
         asset->blobLastUsedStamp = ++renderer->directBlobUseCounter;
         return true;
     }
-    if (N3DSRenderer_directPrefetchTargetsAsset(renderer, asset)) {
+    if (renderer->battleDirectPrefetch.active && renderer->battleDirectPrefetch.asset == asset) {
         N3DSDirectPrefetchStatus status = N3DSRenderer_tickDirectPrefetchJob(renderer, true, NULL);
         if (status == N3DS_DIRECT_PREFETCH_COMPLETE && asset->blobData != NULL && asset->blobSize > 0) return true;
     }
@@ -4097,23 +3864,21 @@ static bool N3DSRenderer_tickDirectTextureBlobPrefetch(
     N3DSRenderer* renderer,
     N3DSDirectTextureAsset* asset,
     const char* relativePath,
-    N3DSDirectPrefetchTickProgress* progress
+    N3DSDirectPrefetchTickBudget* budget
 ) {
     if (renderer == NULL || asset == NULL || relativePath == NULL) return true;
     if (asset->blobData != NULL && asset->blobSize > 0) {
         asset->blobLastUsedStamp = ++renderer->directBlobUseCounter;
         return true;
     }
-    if (!N3DSRenderer_directPrefetchIsActive(renderer)) {
+    if (!renderer->battleDirectPrefetch.active) {
         if (!N3DSRenderer_beginPackedDirectPrefetch(renderer, asset, relativePath)) {
             (void) N3DSRenderer_ensureDirectTextureBlobLoaded(renderer, asset, relativePath);
             return true;
         }
-    } else if (!N3DSRenderer_directPrefetchTargetsAsset(renderer, asset)) {
-        return false;
-    }
+    } else if (renderer->battleDirectPrefetch.asset != asset) return false;
 
-    N3DSDirectPrefetchStatus status = N3DSRenderer_tickDirectPrefetchJob(renderer, false, progress);
+    N3DSDirectPrefetchStatus status = N3DSRenderer_tickDirectPrefetchJob(renderer, false, budget);
     if (status == N3DS_DIRECT_PREFETCH_FAILED) {
         (void) N3DSRenderer_ensureDirectTextureBlobLoaded(renderer, asset, relativePath);
         return true;
@@ -4152,10 +3917,10 @@ static void N3DSRenderer_prewarmBattleDirectSpriteBlobByName(N3DSRenderer* rende
 static bool N3DSRenderer_tickBattleDirectSpriteBlobByName(
     N3DSRenderer* renderer,
     const char* wantedName,
-    N3DSDirectPrefetchTickProgress* progress
+    N3DSDirectPrefetchTickBudget* budget
 ) {
 #if !N3DS_ENABLE_DIRECT_ASSETS
-    (void) renderer; (void) wantedName; (void) progress; return true;
+    (void) renderer; (void) wantedName; (void) budget; return true;
 #else
     if (renderer == NULL || renderer->base.dataWin == NULL || wantedName == NULL) return true;
     DataWin* dw = renderer->base.dataWin;
@@ -4163,17 +3928,17 @@ static bool N3DSRenderer_tickBattleDirectSpriteBlobByName(
     if (spriteIndex < 0 || (uint32_t) spriteIndex >= renderer->directSpriteAssetCount) return true;
     char path[256];
     snprintf(path, sizeof(path), "sprites/spr_%05lu.t3x", (unsigned long) spriteIndex);
-    return N3DSRenderer_tickDirectTextureBlobPrefetch(renderer, &renderer->directSpriteAssets[spriteIndex].sheetAsset, path, progress);
+    return N3DSRenderer_tickDirectTextureBlobPrefetch(renderer, &renderer->directSpriteAssets[spriteIndex].sheetAsset, path, budget);
 #endif
 }
 
 static bool N3DSRenderer_tickBattleDirectFontBlobByName(
     N3DSRenderer* renderer,
     const char* wantedName,
-    N3DSDirectPrefetchTickProgress* progress
+    N3DSDirectPrefetchTickBudget* budget
 ) {
 #if !N3DS_ENABLE_DIRECT_ASSETS
-    (void) renderer; (void) wantedName; (void) progress; return true;
+    (void) renderer; (void) wantedName; (void) budget; return true;
 #else
     if (renderer == NULL || renderer->base.dataWin == NULL || wantedName == NULL) return true;
     int32_t fontIndex = N3DSRenderer_findFontIndexByName(renderer->base.dataWin, wantedName);
@@ -4182,7 +3947,7 @@ static bool N3DSRenderer_tickBattleDirectFontBlobByName(
     if (!N3DSRenderer_shouldUseDirectFontAsset(font)) return true;
     char path[256];
     snprintf(path, sizeof(path), "fonts/font_%05d.t3x", (int) fontIndex);
-    return N3DSRenderer_tickDirectTextureBlobPrefetch(renderer, &renderer->directFontAssets[fontIndex], path, progress);
+    return N3DSRenderer_tickDirectTextureBlobPrefetch(renderer, &renderer->directFontAssets[fontIndex], path, budget);
 #endif
 }
 
@@ -4509,7 +4274,10 @@ static void N3DSRenderer_captureBattlePrewarmTransitionEndDiag(N3DSRenderer* ren
     diag->targetRoomIndex = renderer->battleTransitionRoomIndex;
     diag->stageStart = N3DSRenderer_battlePrewarmDiagStage(renderer->battleTransitionPrewarmStage);
     diag->stageEnd = diag->stageStart;
-    N3DSRenderer_getDirectPrefetchProgress(renderer, &diag->jobBytesCompleted, &diag->jobBytesTotal);
+    if (renderer->battleDirectPrefetch.active) {
+        diag->jobBytesCompleted = renderer->battleDirectPrefetch.bytesRead;
+        diag->jobBytesTotal = renderer->battleDirectPrefetch.dataSize;
+    }
 }
 
 bool N3DSRenderer_tickBattlePrewarm(Renderer* base, Runner* runner) {
@@ -4568,36 +4336,41 @@ bool N3DSRenderer_tickBattlePrewarm(Renderer* base, Runner* runner) {
     const uint32_t fontStageCount = (uint32_t) (sizeof(kN3DSBattleJapaneseCommonFontNames) / sizeof(kN3DSBattleJapaneseCommonFontNames[0]));
     const uint32_t directStageCount = spriteStageCount + fontStageCount;
 
-    N3DSDirectPrefetchTickProgress progress;
-    memset(&progress, 0, sizeof(progress));
+    N3DSDirectPrefetchTickBudget budget;
+    memset(&budget, 0, sizeof(budget));
+    budget.startTick = svcGetSystemTick();
+    uint64_t directBytesBefore = renderer->totalDirectBlobReadBytes;
 
     while (renderer->battleTransitionPrewarmStage < directStageCount) {
+        if (N3DSRenderer_directPrefetchBudgetExhausted(&budget)) break;
         uint32_t stage = renderer->battleTransitionPrewarmStage;
-        uint32_t bytesBeforeStage = progress.bytesRead;
+        uint64_t stageBytesBefore = renderer->totalDirectBlobReadBytes;
         bool complete = false;
         if (stage < spriteStageCount) {
-            complete = N3DSRenderer_tickBattleDirectSpriteBlobByName(renderer, kN3DSBattleDirectSpriteNames[stage], &progress);
+            complete = N3DSRenderer_tickBattleDirectSpriteBlobByName(renderer, kN3DSBattleDirectSpriteNames[stage], &budget);
         } else if (!N3DSRenderer_isJapaneseLanguage(runner)) {
             renderer->battleTransitionPrewarmStage = directStageCount;
             break;
         } else {
             uint32_t fontStage = stage - spriteStageCount;
-            complete = N3DSRenderer_tickBattleDirectFontBlobByName(renderer, kN3DSBattleJapaneseCommonFontNames[fontStage], &progress);
+            complete = N3DSRenderer_tickBattleDirectFontBlobByName(renderer, kN3DSBattleJapaneseCommonFontNames[fontStage], &budget);
         }
-        if (progress.bytesRead != bytesBeforeStage) {
+        if (renderer->totalDirectBlobReadBytes != stageBytesBefore) {
             diag->assetStage = (int32_t) stage;
         }
         if (!complete) break;
         renderer->battleTransitionPrewarmStage++;
     }
 
-    diag->chunksReadThisTick = progress.chunksRead;
-    diag->bytesReadThisTick = progress.bytesRead;
-    if (progress.bytesRead > 0 && progress.lastBytesTotal > 0) {
-        diag->jobBytesCompleted = progress.lastBytesCompleted;
-        diag->jobBytesTotal = progress.lastBytesTotal;
-    } else {
-        N3DSRenderer_getDirectPrefetchProgress(renderer, &diag->jobBytesCompleted, &diag->jobBytesTotal);
+    uint64_t directByteDelta = renderer->totalDirectBlobReadBytes - directBytesBefore;
+    diag->chunksReadThisTick = budget.chunksRead;
+    diag->bytesReadThisTick = directByteDelta > UINT32_MAX ? UINT32_MAX : (uint32_t) directByteDelta;
+    if (renderer->battleDirectPrefetch.active) {
+        diag->jobBytesCompleted = renderer->battleDirectPrefetch.bytesRead;
+        diag->jobBytesTotal = renderer->battleDirectPrefetch.dataSize;
+    } else if (budget.lastBytesTotal > 0) {
+        diag->jobBytesCompleted = budget.lastBytesCompleted;
+        diag->jobBytesTotal = budget.lastBytesTotal;
     }
     diag->stageEnd = N3DSRenderer_battlePrewarmDiagStage(renderer->battleTransitionPrewarmStage);
 
@@ -4758,7 +4531,6 @@ static void N3DSRenderer_init(Renderer* base, DataWin* dataWin) {
     }
     N3DSRenderer_buildDirectAssetMaps(renderer);
     (void) N3DSRenderer_loadPackedDirectAssets(renderer);
-    N3DSRenderer_startDirectPrefetchWorker(renderer);
     (void) N3DSRenderer_loadRoomManifest(renderer);
     renderer->atlasTraceMask = safeCalloc(renderer->atlasItemCount > 0 ? renderer->atlasItemCount : 1u, sizeof(uint8_t));
 #if N3DS_ENABLE_LOGGING
@@ -4789,7 +4561,6 @@ static void N3DSRenderer_destroy(Renderer* base) {
         gN3DSDialogueRenderTraceFile = NULL;
     }
     N3DSRenderer* renderer = (N3DSRenderer*) base;
-    N3DSRenderer_stopDirectPrefetchWorker(renderer);
     N3DSRenderer_cancelDirectPrefetchJob(renderer);
     repeat(renderer->atlasPageCount, i) {
         N3DSRenderer_unloadPage(renderer, (uint32_t) i);
@@ -4807,7 +4578,6 @@ static void N3DSRenderer_destroy(Renderer* base) {
     if (renderer->atlasTraceFile != NULL) fclose(renderer->atlasTraceFile);
     if (renderer->packedAtlasFile != NULL) fclose(renderer->packedAtlasFile);
     if (renderer->packedDirectAssetFile != NULL) fclose(renderer->packedDirectAssetFile);
-    if (renderer->packedDirectPrefetchFile != NULL) fclose(renderer->packedDirectPrefetchFile);
     repeat(renderer->directSpriteAssetCount, spriteIndex) {
         N3DSDirectSpriteAsset* spriteAsset = &renderer->directSpriteAssets[spriteIndex];
         N3DSRenderer_freeDirectTextureAsset(&spriteAsset->sheetAsset, renderer);
@@ -6878,9 +6648,6 @@ Renderer* N3DSRenderer_create(void) {
     sh_new_strdup(renderer->resolvedAssetPathCache);
     renderer->packedDirectAssetMap = NULL;
     sh_new_strdup(renderer->packedDirectAssetMap);
-    LightLock_Init(&renderer->directPrefetchLock);
-    CondVar_Init(&renderer->directPrefetchCond);
-    LightEvent_Init(&renderer->directPrefetchEvent, RESET_ONESHOT);
     return (Renderer*) renderer;
 }
 
