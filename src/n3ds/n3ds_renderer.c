@@ -37,7 +37,8 @@
 #define N3DS_DIRECT_ASSET_MAGIC 0x3152444Eu /* NDR1 */
 #define N3DS_DIRECT_ASSET_VERSION 1u
 #define N3DS_ROOM_MANIFEST_MAGIC 0x4D52334Eu /* N3RM */
-#define N3DS_ROOM_MANIFEST_VERSION 1u
+#define N3DS_ROOM_MANIFEST_VERSION_LEGACY 1u
+#define N3DS_ROOM_MANIFEST_VERSION 2u
 #define N3DS_DIRECT_ASSET_ENTRY_SIZE 16u
 #define N3DS_TOP_WIDTH 400
 #define N3DS_TOP_HEIGHT 240
@@ -327,6 +328,12 @@ typedef struct {
     uint8_t reserved;
 } N3DSRoomManifestPageRef;
 
+typedef struct {
+    int32_t battleGroup;
+    uint32_t pageStart;
+    uint32_t pageCount;
+} N3DSBattleManifestEntry;
+
 typedef struct N3DSRenderer {
     Renderer base;
     C3D_RenderTarget* topTarget;
@@ -465,6 +472,8 @@ typedef struct N3DSRenderer {
     N3DSPackedDirectAssetMapEntry* packedDirectAssetMap;
     N3DSRoomManifestEntry* roomManifestEntries;
     N3DSRoomManifestPageRef* roomManifestPageRefs;
+    N3DSBattleManifestEntry* battleDependencyEntries;
+    N3DSRoomManifestPageRef* battleDependencyPageRefs;
     N3DSDynamicCaptureTPAG* dynamicCaptureTPAGs;
     uint8_t* atlasTraceMask;
     FILE* atlasTraceFile;
@@ -475,6 +484,8 @@ typedef struct N3DSRenderer {
     uint32_t roomManifestEntryCount;
     uint32_t roomManifestPageRefCount;
     uint32_t roomManifestRoomCount;
+    uint32_t battleDependencyEntryCount;
+    uint32_t battleDependencyPageRefCount;
     uint32_t baseTPAGCount;
     uint32_t dynamicCaptureTPAGCount;
     bool bottomScreenGuiActive;
@@ -1425,26 +1436,43 @@ static bool N3DSRenderer_loadRoomManifest(N3DSRenderer* renderer) {
     FILE* file = N3DSRenderer_openAssetFile(renderer, "room_manifest.bin", resolvedPath, sizeof(resolvedPath));
     if (file == NULL) return false;
 
-    uint8_t header[20];
-    if (fread(header, 1, sizeof(header), file) != sizeof(header)) {
+    uint8_t baseHeader[20];
+    if (fread(baseHeader, 1, sizeof(baseHeader), file) != sizeof(baseHeader)) {
         fclose(file);
         return false;
     }
 
-    uint32_t magic = N3DS_readU32(header + 0);
-    uint32_t version = N3DS_readU32(header + 4);
-    uint32_t entryCount = N3DS_readU32(header + 8);
-    uint32_t pageRefCount = N3DS_readU32(header + 12);
-    uint32_t roomCount = N3DS_readU32(header + 16);
-    if (magic != N3DS_ROOM_MANIFEST_MAGIC || version != N3DS_ROOM_MANIFEST_VERSION) {
+    uint32_t magic = N3DS_readU32(baseHeader + 0);
+    uint32_t version = N3DS_readU32(baseHeader + 4);
+    uint32_t entryCount = N3DS_readU32(baseHeader + 8);
+    uint32_t pageRefCount = N3DS_readU32(baseHeader + 12);
+    uint32_t roomCount = N3DS_readU32(baseHeader + 16);
+    if (magic != N3DS_ROOM_MANIFEST_MAGIC ||
+        (version != N3DS_ROOM_MANIFEST_VERSION_LEGACY && version != N3DS_ROOM_MANIFEST_VERSION)) {
         fclose(file);
         return false;
+    }
+
+    uint32_t battleEntryCount = 0;
+    uint32_t battlePageRefCount = 0;
+    uint32_t headerSize = (uint32_t) sizeof(baseHeader);
+    if (version >= N3DS_ROOM_MANIFEST_VERSION) {
+        uint8_t battleHeader[8];
+        if (fread(battleHeader, 1, sizeof(battleHeader), file) != sizeof(battleHeader)) {
+            fclose(file);
+            return false;
+        }
+        battleEntryCount = N3DS_readU32(battleHeader + 0);
+        battlePageRefCount = N3DS_readU32(battleHeader + 4);
+        headerSize += (uint32_t) sizeof(battleHeader);
     }
 
     uint64_t requiredBytes =
-        sizeof(header) +
+        (uint64_t) headerSize +
         (uint64_t) entryCount * sizeof(N3DSRoomManifestEntry) +
-        (uint64_t) pageRefCount * sizeof(N3DSRoomManifestPageRef);
+        (uint64_t) pageRefCount * sizeof(N3DSRoomManifestPageRef) +
+        (uint64_t) battleEntryCount * sizeof(N3DSBattleManifestEntry) +
+        (uint64_t) battlePageRefCount * sizeof(N3DSRoomManifestPageRef);
     if (fseek(file, 0, SEEK_END) != 0) {
         fclose(file);
         return false;
@@ -1454,7 +1482,7 @@ static bool N3DSRenderer_loadRoomManifest(N3DSRenderer* renderer) {
         fclose(file);
         return false;
     }
-    if (fseek(file, (long) sizeof(header), SEEK_SET) != 0) {
+    if (fseek(file, (long) headerSize, SEEK_SET) != 0) {
         fclose(file);
         return false;
     }
@@ -1464,6 +1492,14 @@ static bool N3DSRenderer_loadRoomManifest(N3DSRenderer* renderer) {
     renderer->roomManifestEntryCount = entryCount;
     renderer->roomManifestPageRefCount = pageRefCount;
     renderer->roomManifestRoomCount = roomCount;
+    renderer->battleDependencyEntryCount = battleEntryCount;
+    renderer->battleDependencyPageRefCount = battlePageRefCount;
+    if (battleEntryCount > 0) {
+        renderer->battleDependencyEntries = safeCalloc(battleEntryCount, sizeof(N3DSBattleManifestEntry));
+    }
+    if (battlePageRefCount > 0) {
+        renderer->battleDependencyPageRefs = safeCalloc(battlePageRefCount, sizeof(N3DSRoomManifestPageRef));
+    }
 
     bool ok = true;
     if (entryCount > 0) {
@@ -1472,25 +1508,40 @@ static bool N3DSRenderer_loadRoomManifest(N3DSRenderer* renderer) {
     if (ok && pageRefCount > 0) {
         ok = fread(renderer->roomManifestPageRefs, sizeof(N3DSRoomManifestPageRef), pageRefCount, file) == pageRefCount;
     }
+    if (ok && battleEntryCount > 0) {
+        ok = fread(renderer->battleDependencyEntries, sizeof(N3DSBattleManifestEntry), battleEntryCount, file) == battleEntryCount;
+    }
+    if (ok && battlePageRefCount > 0) {
+        ok = fread(renderer->battleDependencyPageRefs, sizeof(N3DSRoomManifestPageRef), battlePageRefCount, file) == battlePageRefCount;
+    }
     fclose(file);
 
     if (!ok) {
         free(renderer->roomManifestEntries);
         free(renderer->roomManifestPageRefs);
+        free(renderer->battleDependencyEntries);
+        free(renderer->battleDependencyPageRefs);
         renderer->roomManifestEntries = NULL;
         renderer->roomManifestPageRefs = NULL;
+        renderer->battleDependencyEntries = NULL;
+        renderer->battleDependencyPageRefs = NULL;
         renderer->roomManifestEntryCount = 0;
         renderer->roomManifestPageRefCount = 0;
         renderer->roomManifestRoomCount = 0;
+        renderer->battleDependencyEntryCount = 0;
+        renderer->battleDependencyPageRefCount = 0;
         return false;
     }
 
     fprintf(
         stderr,
-        "N3DS: loaded room manifest (%u rooms, %u entries, %u page refs)\n",
+        "N3DS: loaded room manifest v%u (%u rooms, %u room entries, %u room page refs, %u battle groups, %u battle page refs)\n",
+        version,
         roomCount,
         entryCount,
-        pageRefCount
+        pageRefCount,
+        battleEntryCount,
+        battlePageRefCount
     );
     return true;
 }
@@ -1501,6 +1552,18 @@ static const N3DSRoomManifestEntry* N3DSRenderer_findRoomManifestEntry(const N3D
     repeat(renderer->roomManifestEntryCount, i) {
         const N3DSRoomManifestEntry* entry = &renderer->roomManifestEntries[i];
         if (entry->roomIndex == roomIndex) return entry;
+    }
+    return NULL;
+}
+
+static const N3DSBattleManifestEntry* N3DSRenderer_findBattleDependencyEntry(
+    const N3DSRenderer* renderer,
+    int32_t battleGroup
+) {
+    if (renderer == NULL || renderer->battleDependencyEntries == NULL) return NULL;
+    repeat(renderer->battleDependencyEntryCount, i) {
+        const N3DSBattleManifestEntry* entry = &renderer->battleDependencyEntries[i];
+        if (entry->battleGroup == battleGroup) return entry;
     }
     return NULL;
 }
@@ -4024,6 +4087,29 @@ static bool N3DSRenderer_isJapaneseLanguage(Runner* runner) {
     return value.type == RVALUE_STRING && value.string != NULL && strcmp(value.string, "ja") == 0;
 }
 
+static bool N3DSRenderer_tryGetGlobalInt(Runner* runner, const char* name, int32_t* outValue) {
+    if (runner == NULL || runner->vmContext == NULL || name == NULL || outValue == NULL) return false;
+    ptrdiff_t slot = shgeti(runner->vmContext->globalVarNameMap, (char*) name);
+    if (slot < 0) return false;
+    int32_t varID = runner->vmContext->globalVarNameMap[slot].value;
+    if (varID < 0 || (uint32_t) varID >= runner->vmContext->globalVarCount) return false;
+
+    RValue value = runner->vmContext->globalVars[varID];
+    double number;
+    switch (value.type) {
+        case RVALUE_INT32: number = (double) value.int32; break;
+#ifndef NO_RVALUE_INT64
+        case RVALUE_INT64: number = (double) value.int64; break;
+#endif
+        case RVALUE_REAL: number = (double) value.real; break;
+        case RVALUE_BOOL: number = value.int32 ? 1.0 : 0.0; break;
+        default: return false;
+    }
+    if (number < (double) INT32_MIN || number > (double) INT32_MAX) return false;
+    *outValue = (int32_t) number;
+    return true;
+}
+
 static N3DSBattlePrewarmTargetKind N3DSRenderer_getUndertaleBattleTransitionTargetKind(
     N3DSRenderer* renderer,
     Runner* runner
@@ -4419,7 +4505,10 @@ static void N3DSRenderer_addBattleAtlasPrefetchTileEntry(
     }
 }
 
-static void N3DSRenderer_prepareBattleAtlasPrefetchPages(N3DSRenderer* renderer) {
+static void N3DSRenderer_prepareBattleAtlasPrefetchPages(
+    N3DSRenderer* renderer,
+    Runner* runner
+) {
     if (renderer == NULL || renderer->base.dataWin == NULL || renderer->atlasPageCount == 0) return;
 
     if (renderer->battleAtlasPrefetchMask == NULL) {
@@ -4436,6 +4525,85 @@ static void N3DSRenderer_prepareBattleAtlasPrefetchPages(N3DSRenderer* renderer)
     renderer->battleAtlasPrefetchPrepared = true;
 
     DataWin* dw = renderer->base.dataWin;
+
+    // The encounter has already selected global.battlegroup while the battle
+    // transition animation is still running. Put those enemy body/hurt pages
+    // first so the finite worker window is spent on assets that room_battle
+    // cannot discover until scr_battlegroup creates the monster instances.
+    int32_t battleGroup = 0;
+    if (N3DSRenderer_tryGetGlobalInt(runner, "battlegroup", &battleGroup)) {
+        const N3DSBattleManifestEntry* battleEntry =
+            N3DSRenderer_findBattleDependencyEntry(renderer, battleGroup);
+        if (battleEntry != NULL &&
+            battleEntry->pageStart <= renderer->battleDependencyPageRefCount &&
+            battleEntry->pageCount <= renderer->battleDependencyPageRefCount - battleEntry->pageStart) {
+            repeat(battleEntry->pageCount, pageOffset) {
+                uint32_t refIndex = battleEntry->pageStart + (uint32_t) pageOffset;
+                N3DSRenderer_addBattleAtlasPrefetchPage(
+                    renderer,
+                    renderer->battleDependencyPageRefs[refIndex].pageIndex
+                );
+            }
+        }
+    }
+
+    // Battle-critical transient sprites are cheap to identify and showed up as
+    // synchronous room-entry reads on hardware. Prioritize them before the
+    // larger static room backdrop.
+    static const char* const kBattleCriticalAtlasSprites[] = {
+        "spr_blconsm",
+        "spr_dmgnum_o",
+        "spr_dmgmiss_o",
+        "spr_heartsmall",
+    };
+    repeat(sizeof(kBattleCriticalAtlasSprites) / sizeof(kBattleCriticalAtlasSprites[0]), nameIndex) {
+        N3DSRenderer_addBattleAtlasPrefetchSprite(
+            renderer,
+            N3DSRenderer_findSpriteIndexByName(dw, kBattleCriticalAtlasSprites[nameIndex])
+        );
+    }
+
+    static const char* const kBattleJapaneseUiAtlasSprites[] = {
+        "spr_fightbt_ja",
+        "spr_talkbt_ja",
+        "spr_itembt_ja",
+        "spr_sparebt_ja",
+    };
+    static const char* const kBattleDefaultUiAtlasSprites[] = {
+        "spr_fightbt",
+        "spr_talkbt",
+        "spr_itembt",
+        "spr_sparebt",
+    };
+    const char* const* uiNames = N3DSRenderer_isJapaneseLanguage(runner)
+        ? kBattleJapaneseUiAtlasSprites
+        : kBattleDefaultUiAtlasSprites;
+    uint32_t uiNameCount = N3DSRenderer_isJapaneseLanguage(runner)
+        ? (uint32_t) (sizeof(kBattleJapaneseUiAtlasSprites) / sizeof(kBattleJapaneseUiAtlasSprites[0]))
+        : (uint32_t) (sizeof(kBattleDefaultUiAtlasSprites) / sizeof(kBattleDefaultUiAtlasSprites[0]));
+    repeat(uiNameCount, nameIndex) {
+        N3DSRenderer_addBattleAtlasPrefetchSprite(
+            renderer,
+            N3DSRenderer_findSpriteIndexByName(dw, uiNames[nameIndex])
+        );
+    }
+
+    static const char* const kBattleStaticPriorityAtlasSprites[] = {
+        "spr_battlebg",
+        "spr_border",
+        "spr_pixblk",
+        "spr_hpname",
+    };
+    repeat(sizeof(kBattleStaticPriorityAtlasSprites) / sizeof(kBattleStaticPriorityAtlasSprites[0]), nameIndex) {
+        N3DSRenderer_addBattleAtlasPrefetchSprite(
+            renderer,
+            N3DSRenderer_findSpriteIndexByName(dw, kBattleStaticPriorityAtlasSprites[nameIndex])
+        );
+    }
+
+    // Remaining room dependencies come last. They are still useful if the
+    // transition provides enough idle frames, but they no longer displace the
+    // selected encounter's enemy pages.
     int32_t roomIndex = renderer->battleTransitionRoomIndex;
     if (roomIndex >= 0 && (uint32_t) roomIndex < dw->room.count) {
         const N3DSRoomManifestEntry* manifest =
@@ -4508,19 +4676,6 @@ static void N3DSRenderer_prepareBattleAtlasPrefetchPages(N3DSRenderer* renderer)
             }
         }
     }
-
-    static const char* const kBattleCommonAtlasSprites[] = {
-        "spr_battlebg",
-        "spr_heartsmall",
-        "spr_blconsm",
-        "spr_dmgnum_o",
-    };
-    repeat(sizeof(kBattleCommonAtlasSprites) / sizeof(kBattleCommonAtlasSprites[0]), nameIndex) {
-        N3DSRenderer_addBattleAtlasPrefetchSprite(
-            renderer,
-            N3DSRenderer_findSpriteIndexByName(dw, kBattleCommonAtlasSprites[nameIndex])
-        );
-    }
 }
 
 static void N3DSRenderer_resetBattleAtlasPrefetch(N3DSRenderer* renderer) {
@@ -4536,6 +4691,7 @@ static void N3DSRenderer_resetBattleAtlasPrefetch(N3DSRenderer* renderer) {
 
 static bool N3DSRenderer_tickBattleAtlasPrefetch(
     N3DSRenderer* renderer,
+    Runner* runner,
     AudioSystem* audioSystem,
     N3DSBattlePrewarmTickDiag* diag
 ) {
@@ -4546,7 +4702,7 @@ static bool N3DSRenderer_tickBattleAtlasPrefetch(
     }
 
     if (!renderer->battleAtlasPrefetchPrepared) {
-        N3DSRenderer_prepareBattleAtlasPrefetchPages(renderer);
+        N3DSRenderer_prepareBattleAtlasPrefetchPages(renderer, runner);
     }
 
     N3DSAtlasPrefetchJob* job = &renderer->battleAtlasPrefetch;
@@ -4873,7 +5029,7 @@ bool N3DSRenderer_tickBattlePrewarm(Renderer* base, Runner* runner) {
 
     if (renderer->battleTransitionPrewarmStage == atlasStage) {
         diag->assetStage = (int32_t) atlasStage;
-        if (!N3DSRenderer_tickBattleAtlasPrefetch(renderer, runner->audioSystem, diag)) {
+        if (!N3DSRenderer_tickBattleAtlasPrefetch(renderer, runner, runner->audioSystem, diag)) {
             diag->stageEnd = (int32_t) atlasStage;
             return true;
         }
@@ -5080,6 +5236,8 @@ static void N3DSRenderer_destroy(Renderer* base) {
     shfree(renderer->packedDirectAssetMap);
     free(renderer->roomManifestEntries);
     free(renderer->roomManifestPageRefs);
+    free(renderer->battleDependencyEntries);
+    free(renderer->battleDependencyPageRefs);
     free(renderer->battleAtlasPrefetchMask);
     free(renderer->battleAtlasPrefetchPages);
     free(renderer->atlasTraceMask);

@@ -62,7 +62,8 @@
 #define N3DS_DIRECT_ASSET_MAGIC 0x3152444Eu /* NDR1 */
 #define N3DS_DIRECT_ASSET_VERSION 1u
 #define N3DS_ROOM_MANIFEST_MAGIC 0x4D52334Eu /* N3RM */
-#define N3DS_ROOM_MANIFEST_VERSION 1u
+#define N3DS_ROOM_MANIFEST_VERSION_LEGACY 1u
+#define N3DS_ROOM_MANIFEST_VERSION 2u
 #define N3DS_SOUND_BANK_MAGIC 0x314B4253u /* SBK1 */
 #define N3DS_SOUND_BANK_VERSION 2u
 #define N3DS_SOUND_BANK_ENTRY_CHANNEL_MASK 0x000000FFu
@@ -223,6 +224,134 @@ typedef struct {
     uint8_t flags;
     uint8_t reserved;
 } N3DSRoomManifestPageRef;
+
+typedef struct {
+    int32_t battleGroup;
+    uint32_t pageStart;
+    uint32_t pageCount;
+} N3DSBattleManifestEntry;
+
+typedef struct {
+    int32_t battleGroup;
+    const char* objectNames[4];
+} N3DSUndertaleBattleDependencySpec;
+
+// Resolve battle-group dependencies by object name against the user's data.win.
+// Missing/version-specific objects are skipped instead of baking object indexes
+// from any one UNDERTALE build into the generated manifest.
+static const N3DSUndertaleBattleDependencySpec kN3DSUndertaleBattleDependencySpecs[] = {
+    { 256, { "obj_testmonster", NULL, NULL, NULL } },
+    { 255, { "obj_dummymonster", NULL, NULL, NULL } },
+    { 140, { "obj_fakefroggit", NULL, NULL, NULL } },
+    { 135, { "obj_froggit", NULL, NULL, NULL } },
+    { 134, { "obj_whimsun", NULL, NULL, NULL } },
+    { 133, { "obj_froggit", "obj_whimsun", NULL, NULL } },
+    { 132, { "obj_moldsmal", NULL, NULL, NULL } },
+    { 131, { "obj_moldsmal", NULL, NULL, NULL } },
+    { 130, { "obj_froggit", NULL, NULL, NULL } },
+    { 129, { "obj_moldsmal", NULL, NULL, NULL } },
+    { 128, { "obj_moldsmal", "obj_migosp", NULL, NULL } },
+    { 127, { "obj_migosp", "obj_vegetoid", NULL, NULL } },
+    { 126, { "obj_loox", NULL, NULL, NULL } },
+    { 125, { "obj_loox", "obj_vegetoid", NULL, NULL } },
+    { 124, { "obj_loox", "obj_vegetoid", "obj_migosp", NULL } },
+    { 123, { "obj_vegetoid", NULL, NULL, NULL } },
+    { 122, { "obj_loox", NULL, NULL, NULL } },
+    { 121, { "obj_vegetoid", NULL, NULL, NULL } },
+    { 101, { "obj_napstablook", NULL, NULL, NULL } },
+    { 100, { "obj_loox", NULL, NULL, NULL } },
+    { 95, { "obj_torielboss", NULL, NULL, NULL } },
+    { 94, { "obj_movedoge", NULL, NULL, NULL } },
+    { 93, { "obj_lesserdoge", NULL, NULL, NULL } },
+    { 92, { "obj_mandog", "obj_womandog", NULL, NULL } },
+    { 91, { "obj_greatdog", NULL, NULL, NULL } },
+    { 90, { "obj_papyrusboss", NULL, NULL, NULL } },
+    { 89, { "obj_gyftrot", NULL, NULL, NULL } },
+    { 88, { "obj_chilldrake", "obj_snowdrake", NULL, NULL } },
+    { 87, { "obj_chilldrake", NULL, NULL, NULL } },
+    { 86, { "obj_icecap", NULL, NULL, NULL } },
+    { 85, { "obj_icecap", "obj_chilldrake", "obj_snowdrake", NULL } },
+    { 84, { "obj_jerry", NULL, NULL, NULL } },
+    { 83, { "obj_icecap", "obj_jerry", NULL, NULL } },
+    { 82, { "obj_icecap", "obj_jerry", "obj_chilldrake", "obj_snowdrake" } },
+    { 81, { "obj_aaron", NULL, NULL, NULL } },
+    { 80, { "obj_tembattle", NULL, NULL, NULL } },
+    { 79, { "obj_moldsmal", "obj_moldsmalx", NULL, NULL } },
+    { 78, { "obj_woshua", NULL, NULL, NULL } },
+    { 77, { "obj_shyren", NULL, NULL, NULL } },
+    { 76, { "obj_maddummy", NULL, NULL, NULL } },
+    { 75, { "obj_aaron", "obj_woshua", NULL, NULL } },
+    { 74, { "obj_undyneboss", NULL, NULL, NULL } },
+    { 73, { "obj_mettatonb_quiz", "obj_questionasker", NULL, NULL } },
+    { 72, { "obj_bara01", "obj_bara02", NULL, NULL } },
+    { 71, { "obj_tsunderplane", NULL, NULL, NULL } },
+    { 70, { "obj_vulkin", NULL, NULL, NULL } },
+    { 69, { "obj_pyrope", NULL, NULL, NULL } },
+    { 68, { "obj_moldsmal", NULL, NULL, NULL } },
+    { 67, { "obj_woshua", "obj_aaron", NULL, NULL } },
+    { 66, { "obj_woshua", "obj_moldsmalx", NULL, NULL } },
+    { 65, { "obj_spiderb", NULL, NULL, NULL } },
+    { 64, { "obj_mettatonb_second", NULL, NULL, NULL } },
+    { 63, { "obj_undynebattle2", NULL, NULL, NULL } },
+    { 62, { "obj_wizard", NULL, NULL, NULL } },
+    { 61, { "obj_finalknight", NULL, NULL, NULL } },
+    { 60, { "obj_finalfroggit", NULL, NULL, NULL } },
+    { 59, { "obj_astigmatism", NULL, NULL, NULL } },
+    { 58, { "obj_whimsalot", NULL, NULL, NULL } },
+    { 57, { "obj_whimsalot", "obj_finalfroggit", NULL, NULL } },
+    { 56, { "obj_whimsalot", "obj_astigmatism", NULL, NULL } },
+    { 55, { "obj_finalfroggit", "obj_astigmatism", NULL, NULL } },
+    { 54, { "obj_finalfroggit", "obj_astigmatism", "obj_whimsalot", NULL } },
+    { 53, { "obj_finalknight", "obj_wizard", NULL, NULL } },
+    { 52, { "obj_battlebomb", NULL, NULL, NULL } },
+    { 51, { "obj_battlebomb", NULL, NULL, NULL } },
+    { 50, { "obj_battlebomb", NULL, NULL, NULL } },
+    { 49, { "obj_battlebomb", NULL, NULL, NULL } },
+    { 48, { "obj_battlebomb", NULL, NULL, NULL } },
+    { 47, { "obj_battlebomb", NULL, NULL, NULL } },
+    { 46, { "obj_battlebomb", NULL, NULL, NULL } },
+    { 45, { "obj_bara04", "obj_bara03", NULL, NULL } },
+    { 44, { "obj_tsunderplane", "obj_vulkin", NULL, NULL } },
+    { 43, { "obj_pyrope", NULL, NULL, NULL } },
+    { 42, { "obj_vulkin", NULL, NULL, NULL } },
+    { 41, { "obj_mettatonb_third", NULL, NULL, NULL } },
+    { 40, { "obj_mettatonex", NULL, NULL, NULL } },
+    { 36, { "obj_lemonbread", NULL, NULL, NULL } },
+    { 35, { "obj_reaperbird", NULL, NULL, NULL } },
+    { 34, { "obj_snowdrakemom", NULL, NULL, NULL } },
+    { 33, { "obj_memoryhead", NULL, NULL, NULL } },
+    { 32, { "obj_endogeny", NULL, NULL, NULL } },
+    { 31, { "obj_ripoff_undyne", NULL, NULL, NULL } },
+    { 30, { "obj_ripoff_papyrus", "obj_ripoff_sans", NULL, NULL } },
+    { 28, { "obj_ripoff_alphys", NULL, NULL, NULL } },
+    { 27, { "obj_ripoff_toriel", "obj_ripoff_asgore", NULL, NULL } },
+    { 26, { "obj_mkid_battle", NULL, NULL, NULL } },
+    { 25, { "obj_undyne_ex", NULL, NULL, NULL } },
+    { 24, { "obj_gladdummy", NULL, NULL, NULL } },
+    { 23, { "obj_mettaton_neo", NULL, NULL, NULL } },
+    { 22, { "obj_sansb", NULL, NULL, NULL } },
+    { 21, { "obj_asgore_finalintro", NULL, NULL, NULL } },
+    { 20, { "obj_asgoreb", "obj_purplegradienter", "obj_orangeparticlegen", NULL } },
+    { 19, { "obj_finalfroggit", "obj_astigmatism", NULL, NULL } },
+    { 18, { "obj_finalfroggit", "obj_migospel", NULL, NULL } },
+    { 17, { "obj_parsnik", NULL, NULL, NULL } },
+    { 16, { "obj_moldessa", NULL, NULL, NULL } },
+    { 15, { "obj_moldessa", NULL, NULL, NULL } },
+    { 14, { "obj_finalfroggit", "obj_whimsalot", NULL, NULL } },
+    { 13, { "obj_finalfroggit", NULL, NULL, NULL } },
+    { 12, { "obj_whimsalot", "obj_parsnik", NULL, NULL } },
+    { 11, { "obj_moldessa", "obj_migospel", NULL, NULL } },
+    { 10, { "obj_parsnik", "obj_migospel", NULL, NULL } },
+    { 9, { "obj_parsnik", NULL, NULL, NULL } },
+    { 8, { "obj_parsnik", "obj_astigmatism", NULL, NULL } },
+    { 7, { "obj_astigmatism", NULL, NULL, NULL } },
+    { 6, { "obj_astigmatism", "obj_migospel", "obj_moldessa", NULL } },
+    { 5, { "obj_whimsalot", "obj_parsnik", "obj_moldessa", NULL } },
+    { 4, { "obj_glydeb", NULL, NULL, NULL } },
+    { 3, { "obj_sosorry", NULL, NULL, NULL } },
+    { 2, { "obj_asrielb", NULL, NULL, NULL } },
+    { 1, { "obj_asrielfinal", NULL, NULL, NULL } },
+};
 
 static bool fileExists(const char* path);
 static bool directoryExists(const char* path);
@@ -2779,9 +2908,84 @@ static void markRoomManifestTileEntryPages(
     }
 }
 
+
+static int32_t findBattleManifestObjectIndexByName(const DataWin* dataWin, const char* wantedName) {
+    if (dataWin == NULL || wantedName == NULL) return -1;
+    repeat(dataWin->objt.count, objectIndex) {
+        const GameObject* object = &dataWin->objt.objects[objectIndex];
+        if (object->name != NULL && strcmp(object->name, wantedName) == 0) return (int32_t) objectIndex;
+    }
+    return -1;
+}
+
+static void markBattleManifestObjectPages(
+    const DataWin* dataWin,
+    const char* objectName,
+    uint32_t totalPageCount,
+    const OutputItem* items,
+    const OutputFragment* fragments,
+    bool* seenPages
+) {
+    if (dataWin == NULL || objectName == NULL || items == NULL || fragments == NULL || seenPages == NULL) return;
+
+    int32_t objectIndex = findBattleManifestObjectIndexByName(dataWin, objectName);
+    if (objectIndex < 0) return;
+    const GameObject* object = &dataWin->objt.objects[objectIndex];
+
+    int32_t defaultSpriteIndex = object->spriteId;
+    markRoomManifestSpritePages(dataWin, defaultSpriteIndex, totalPageCount, items, fragments, seenPages);
+
+    const char* defaultSpriteName = NULL;
+    if (defaultSpriteIndex >= 0 && (uint32_t) defaultSpriteIndex < dataWin->sprt.count) {
+        defaultSpriteName = dataWin->sprt.sprites[defaultSpriteIndex].name;
+    }
+
+    // Battle monsters commonly switch to a <default sprite>hurt variant only
+    // after room_battle starts. Include those pages before the instance exists.
+    if (defaultSpriteName != NULL && defaultSpriteName[0] != '\0') {
+        size_t prefixLen = strlen(defaultSpriteName);
+        repeat(dataWin->sprt.count, spriteIndex) {
+            const char* spriteName = dataWin->sprt.sprites[spriteIndex].name;
+            if (spriteName == NULL || (int32_t) spriteIndex == defaultSpriteIndex) continue;
+            if (strncmp(spriteName, defaultSpriteName, prefixLen) == 0 &&
+                strstr(spriteName + prefixLen, "hurt") != NULL) {
+                markRoomManifestSpritePages(
+                    dataWin,
+                    (int32_t) spriteIndex,
+                    totalPageCount,
+                    items,
+                    fragments,
+                    seenPages
+                );
+            }
+        }
+    }
+
+    // Some battle objects have no default sprite and assign one in Create.
+    // A conservative object-name prefix catches the usual obj_foo -> spr_foo
+    // body/hurt convention without pulling unrelated battle sprites.
+    if (defaultSpriteIndex < 0 && strncmp(objectName, "obj_", 4) == 0) {
+        char spritePrefix[160];
+        snprintf(spritePrefix, sizeof(spritePrefix), "spr_%s", objectName + 4);
+        size_t prefixLen = strlen(spritePrefix);
+        repeat(dataWin->sprt.count, spriteIndex) {
+            const char* spriteName = dataWin->sprt.sprites[spriteIndex].name;
+            if (spriteName == NULL || strncmp(spriteName, spritePrefix, prefixLen) != 0) continue;
+            markRoomManifestSpritePages(
+                dataWin,
+                (int32_t) spriteIndex,
+                totalPageCount,
+                items,
+                fragments,
+                seenPages
+            );
+        }
+    }
+}
+
 static bool writeRoomManifestFile(
     const char* outputDir,
-    const DataWin* dataWin,
+    DataWin* dataWin,
     uint32_t totalPageCount,
     const OutputItem* items,
     const OutputFragment* fragments,
@@ -2810,6 +3014,7 @@ static bool writeRoomManifestFile(
     uint32_t roomWithPagesCount = 0;
 
     repeat(dataWin->room.count, roomIndex) {
+        (void) DataWin_loadRoomPayload(dataWin, (int32_t) roomIndex);
         Room* room = &dataWin->room.rooms[roomIndex];
         bool* seenPages = safeCalloc(totalPageCount > 0 ? totalPageCount : 1u, sizeof(bool));
         uint32_t pageStart = (uint32_t) arrlen(pageRefs);
@@ -2886,39 +3091,95 @@ static bool writeRoomManifestFile(
         free(seenPages);
     }
 
+    N3DSBattleManifestEntry* battleEntries = NULL;
+    N3DSRoomManifestPageRef* battlePageRefs = NULL;
+    uint32_t battleGroupWithPagesCount = 0;
+
+    repeat(sizeof(kN3DSUndertaleBattleDependencySpecs) / sizeof(kN3DSUndertaleBattleDependencySpecs[0]), specIndex) {
+        const N3DSUndertaleBattleDependencySpec* spec = &kN3DSUndertaleBattleDependencySpecs[specIndex];
+        bool* seenPages = safeCalloc(totalPageCount > 0 ? totalPageCount : 1u, sizeof(bool));
+        uint32_t pageStart = (uint32_t) arrlen(battlePageRefs);
+
+        repeat(4u, objectSlot) {
+            const char* objectName = spec->objectNames[objectSlot];
+            if (objectName == NULL) continue;
+            markBattleManifestObjectPages(
+                dataWin,
+                objectName,
+                totalPageCount,
+                items,
+                fragments,
+                seenPages
+            );
+        }
+
+        repeat(totalPageCount, pageIndex) {
+            if (!seenPages[pageIndex]) continue;
+            N3DSRoomManifestPageRef ref = {
+                .pageIndex = (uint16_t) pageIndex,
+                .flags = 0,
+                .reserved = 0,
+            };
+            arrput(battlePageRefs, ref);
+        }
+
+        uint32_t pageCount = (uint32_t) arrlen(battlePageRefs) - pageStart;
+        if (pageCount > 0) {
+            N3DSBattleManifestEntry entry = {
+                .battleGroup = spec->battleGroup,
+                .pageStart = pageStart,
+                .pageCount = pageCount,
+            };
+            arrput(battleEntries, entry);
+            battleGroupWithPagesCount++;
+        }
+        free(seenPages);
+    }
+
     FILE* file = fopen(manifestPath, "wb");
     if (file == NULL) {
         hmfree(tileEntryMap);
         arrfree(entries);
         arrfree(pageRefs);
+        arrfree(battleEntries);
+        arrfree(battlePageRefs);
         fprintf(stderr, "Failed to open room manifest output: %s\n", manifestPath);
         return false;
     }
 
-    uint32_t header[5] = {
+    uint32_t header[7] = {
         N3DS_ROOM_MANIFEST_MAGIC,
         N3DS_ROOM_MANIFEST_VERSION,
         (uint32_t) arrlen(entries),
         (uint32_t) arrlen(pageRefs),
         dataWin->room.count,
+        (uint32_t) arrlen(battleEntries),
+        (uint32_t) arrlen(battlePageRefs),
     };
     bool ok = fwrite(header, sizeof(header), 1, file) == 1;
     if (ok && arrlen(entries) > 0) ok = fwrite(entries, sizeof(N3DSRoomManifestEntry), arrlen(entries), file) == arrlen(entries);
     if (ok && arrlen(pageRefs) > 0) ok = fwrite(pageRefs, sizeof(N3DSRoomManifestPageRef), arrlen(pageRefs), file) == arrlen(pageRefs);
+    if (ok && arrlen(battleEntries) > 0) ok = fwrite(battleEntries, sizeof(N3DSBattleManifestEntry), arrlen(battleEntries), file) == arrlen(battleEntries);
+    if (ok && arrlen(battlePageRefs) > 0) ok = fwrite(battlePageRefs, sizeof(N3DSRoomManifestPageRef), arrlen(battlePageRefs), file) == arrlen(battlePageRefs);
     fclose(file);
 
     fprintf(
         stderr,
-        "n3ds-preprocess: wrote room manifest (%u rooms, %u non-empty, %u page refs) -> %s\n",
+        "n3ds-preprocess: wrote room manifest v%u (%u rooms, %u non-empty, %u room page refs; %u battle groups, %u battle page refs) -> %s\n",
+        N3DS_ROOM_MANIFEST_VERSION,
         dataWin->room.count,
         roomWithPagesCount,
         (unsigned int) arrlen(pageRefs),
+        battleGroupWithPagesCount,
+        (unsigned int) arrlen(battlePageRefs),
         manifestPath
     );
 
     hmfree(tileEntryMap);
     arrfree(entries);
     arrfree(pageRefs);
+    arrfree(battleEntries);
+    arrfree(battlePageRefs);
     return ok;
 }
 
