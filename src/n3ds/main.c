@@ -1186,7 +1186,8 @@ static const char* N3DSPerf_battlePrewarmAssetName(int32_t stage) {
         case 3: return "fnt_ja_curs";
         case 4: return "fnt_ja_main";
         case 5: return "fnt_ja_plain";
-        case 6: return "manifest";
+        case 6: return "atlas";
+        case 7: return "manifest";
         default: return "";
     }
 }

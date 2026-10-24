@@ -287,6 +287,16 @@ typedef struct {
 } N3DSDirectPrefetchJob;
 
 typedef struct {
+    AudioSystem* audioSystem;
+    uint32_t pageIndex;
+    uint32_t dataSize;
+    uint32_t bytesRead;
+    uint32_t workerChunksRead;
+    uint32_t workerRequestId;
+    bool active;
+} N3DSAtlasPrefetchJob;
+
+typedef struct {
     u64 startTick;
     uint32_t chunksRead;
     uint32_t blockingChunksRead;
@@ -436,6 +446,12 @@ typedef struct N3DSRenderer {
     int32_t battleWriterObjectIndex;
     bool battleTransitionPrewarmSeen;
     N3DSDirectPrefetchJob battleDirectPrefetch;
+    N3DSAtlasPrefetchJob battleAtlasPrefetch;
+    uint8_t* battleAtlasPrefetchMask;
+    uint32_t* battleAtlasPrefetchPages;
+    uint32_t battleAtlasPrefetchPageCount;
+    uint32_t battleAtlasPrefetchPageCursor;
+    bool battleAtlasPrefetchPrepared;
     N3DSBattlePrewarmTickDiag lastBattlePrewarmTickDiag;
     bool battleTransitionManifestLoaded;
     bool battleTransitionManifestAttempted;
@@ -454,6 +470,7 @@ typedef struct N3DSRenderer {
     FILE* atlasTraceFile;
     FILE* packedAtlasFile;
     FILE* packedDirectAssetFile;
+    char packedAtlasPath[512];
     char packedDirectAssetPath[512];
     uint32_t roomManifestEntryCount;
     uint32_t roomManifestPageRefCount;
@@ -1617,12 +1634,103 @@ static bool N3DSRenderer_evictLRUPageBlob(N3DSRenderer* renderer, uint32_t exclu
     return true;
 }
 
+static void N3DSRenderer_cancelBattleAtlasPrefetchJob(N3DSRenderer* renderer) {
+    if (renderer == NULL) return;
+    N3DSAtlasPrefetchJob* job = &renderer->battleAtlasPrefetch;
+    if (job->active && job->audioSystem != NULL && job->workerRequestId != 0) {
+        N3DSAudioSystem_cancelWorkerRead(job->audioSystem, job->workerRequestId);
+    }
+    memset(job, 0, sizeof(*job));
+}
+
+static bool N3DSRenderer_publishBattleAtlasPrefetchJob(
+    N3DSRenderer* renderer,
+    uint8_t* data,
+    uint32_t dataSize
+) {
+    if (renderer == NULL) {
+        free(data);
+        return false;
+    }
+
+    N3DSAtlasPrefetchJob* job = &renderer->battleAtlasPrefetch;
+    uint32_t pageIndex = job->pageIndex;
+    uint32_t expectedSize = job->dataSize;
+    memset(job, 0, sizeof(*job));
+
+    if (data == NULL || dataSize == 0 || dataSize != expectedSize || pageIndex >= renderer->atlasPageCount) {
+        free(data);
+        return false;
+    }
+
+    N3DSLoadedAtlasPage* page = &renderer->atlasPages[pageIndex];
+    if (page->t3xData != NULL && page->t3xSize > 0) {
+        page->blobLastUsedStamp = ++renderer->blobUseCounter;
+        free(data);
+        return true;
+    }
+
+    while ((uint64_t) renderer->cachedT3xBytes + (uint64_t) dataSize > (uint64_t) renderer->cachedT3xByteLimit) {
+        if (!N3DSRenderer_evictLRUPageBlob(renderer, pageIndex)) break;
+    }
+
+    page->t3xData = data;
+    page->t3xSize = dataSize;
+    page->blobLastUsedStamp = ++renderer->blobUseCounter;
+    renderer->cachedT3xBytes += dataSize;
+    renderer->frameBlobReads++;
+    renderer->totalAtlasBlobReads++;
+    renderer->totalAtlasBlobReadBytes += (uint64_t) dataSize;
+    if (renderer->frameBlobReadEventCount < N3DS_FRAME_PAGE_IMPORT_EVENT_CAP) {
+        uint32_t eventIndex = renderer->frameBlobReadEventCount++;
+        renderer->frameBlobReadEventPages[eventIndex] =
+            pageIndex <= UINT16_MAX ? (uint16_t) pageIndex : UINT16_MAX;
+    }
+    return true;
+}
+
+static bool N3DSRenderer_drainBattleAtlasPrefetchJob(N3DSRenderer* renderer) {
+    if (renderer == NULL || !renderer->battleAtlasPrefetch.active) return true;
+
+    N3DSAtlasPrefetchJob* job = &renderer->battleAtlasPrefetch;
+    if (job->audioSystem == NULL || job->workerRequestId == 0 ||
+        !N3DSAudioSystem_waitWorkerRead(job->audioSystem, job->workerRequestId)) {
+        N3DSRenderer_cancelBattleAtlasPrefetchJob(renderer);
+        return false;
+    }
+
+    uint8_t* data = NULL;
+    uint32_t dataSize = 0;
+    if (!N3DSAudioSystem_takeWorkerRead(
+            job->audioSystem,
+            job->workerRequestId,
+            &data,
+            &dataSize)) {
+        free(data);
+        memset(job, 0, sizeof(*job));
+        return false;
+    }
+
+    return N3DSRenderer_publishBattleAtlasPrefetchJob(renderer, data, dataSize);
+}
+
 static bool N3DSRenderer_ensurePageBlobLoaded(N3DSRenderer* renderer, uint32_t pageIndex) {
     if (pageIndex >= renderer->atlasPageCount) return false;
     N3DSLoadedAtlasPage* page = &renderer->atlasPages[pageIndex];
     if (page->t3xData != NULL && page->t3xSize > 0) {
         page->blobLastUsedStamp = ++renderer->blobUseCounter;
         return true;
+    }
+
+    // If the shared worker is already reading this packed atlas, drain it before
+    // any main-thread read. This keeps one-at-a-time access to atlas.bin even on
+    // RomFS backends where separate FILE* objects share the same FS handle.
+    if (renderer->battleAtlasPrefetch.active) {
+        (void) N3DSRenderer_drainBattleAtlasPrefetchJob(renderer);
+        if (page->t3xData != NULL && page->t3xSize > 0) {
+            page->blobLastUsedStamp = ++renderer->blobUseCounter;
+            return true;
+        }
     }
 
     FILE* pageFile = NULL;
@@ -3326,8 +3434,12 @@ static bool N3DSRenderer_loadAtlas(N3DSRenderer* renderer) {
         }
     }
     free(blob);
-    if (N3DSRenderer_isPackedAtlasVersion(version)) renderer->packedAtlasFile = atlasFile;
-    else fclose(atlasFile);
+    if (N3DSRenderer_isPackedAtlasVersion(version)) {
+        renderer->packedAtlasFile = atlasFile;
+        snprintf(renderer->packedAtlasPath, sizeof(renderer->packedAtlasPath), "%s", assetPath);
+    } else {
+        fclose(atlasFile);
+    }
 
     repeat(renderer->atlasPageCount, i) {
         N3DSLoadedAtlasPage* page = &renderer->atlasPages[i];
@@ -4249,6 +4361,269 @@ static void N3DSRenderer_prewarmBattleCriticalAtlasBlobs(N3DSRenderer* renderer,
     free(seenPages);
 }
 
+static void N3DSRenderer_addBattleAtlasPrefetchPage(N3DSRenderer* renderer, uint32_t pageIndex) {
+    if (renderer == NULL || renderer->battleAtlasPrefetchMask == NULL ||
+        renderer->battleAtlasPrefetchPages == NULL || pageIndex >= renderer->atlasPageCount) {
+        return;
+    }
+    if (renderer->battleAtlasPrefetchMask[pageIndex] != 0) return;
+    renderer->battleAtlasPrefetchMask[pageIndex] = 1;
+    renderer->battleAtlasPrefetchPages[renderer->battleAtlasPrefetchPageCount++] = pageIndex;
+}
+
+static void N3DSRenderer_addBattleAtlasPrefetchTPAG(N3DSRenderer* renderer, int32_t tpagIndex) {
+    if (renderer == NULL || tpagIndex < 0 || (uint32_t) tpagIndex >= renderer->atlasItemCount) return;
+
+    if (N3DSRenderer_isFragmentedAtlasVersion(renderer->atlasVersion)) {
+        N3DSAtlasItemV3* item = &renderer->atlasItemsV3[tpagIndex];
+        repeat(item->fragmentCount, fragmentOffset) {
+            uint32_t fragmentIndex = item->fragmentStart + (uint32_t) fragmentOffset;
+            if (fragmentIndex >= renderer->atlasFragmentCount) break;
+            N3DSRenderer_addBattleAtlasPrefetchPage(renderer, renderer->atlasFragments[fragmentIndex].atlasId);
+        }
+        return;
+    }
+
+    N3DSRenderer_addBattleAtlasPrefetchPage(renderer, renderer->atlasItems[tpagIndex].atlasId);
+}
+
+static void N3DSRenderer_addBattleAtlasPrefetchSprite(N3DSRenderer* renderer, int32_t spriteIndex) {
+    if (renderer == NULL || renderer->base.dataWin == NULL || spriteIndex < 0 ||
+        (uint32_t) spriteIndex >= renderer->base.dataWin->sprt.count) {
+        return;
+    }
+
+    DataWin* dw = renderer->base.dataWin;
+    Sprite* sprite = &dw->sprt.sprites[spriteIndex];
+    repeat(sprite->textureCount, frameIndex) {
+        N3DSRenderer_addBattleAtlasPrefetchTPAG(
+            renderer,
+            Renderer_resolveTPAGIndex(dw, spriteIndex, (int32_t) frameIndex)
+        );
+    }
+}
+
+static void N3DSRenderer_addBattleAtlasPrefetchTileEntry(
+    N3DSRenderer* renderer,
+    const N3DSTileAtlasEntry* entry
+) {
+    if (renderer == NULL || entry == NULL) return;
+    if (entry->fragmentCount > 0) {
+        repeat(entry->fragmentCount, fragmentOffset) {
+            uint32_t fragmentIndex = entry->fragmentStart + (uint32_t) fragmentOffset;
+            if (fragmentIndex >= renderer->atlasFragmentCount) break;
+            N3DSRenderer_addBattleAtlasPrefetchPage(renderer, renderer->atlasFragments[fragmentIndex].atlasId);
+        }
+    } else {
+        N3DSRenderer_addBattleAtlasPrefetchPage(renderer, entry->atlasId);
+    }
+}
+
+static void N3DSRenderer_prepareBattleAtlasPrefetchPages(N3DSRenderer* renderer) {
+    if (renderer == NULL || renderer->base.dataWin == NULL || renderer->atlasPageCount == 0) return;
+
+    if (renderer->battleAtlasPrefetchMask == NULL) {
+        renderer->battleAtlasPrefetchMask = safeCalloc(renderer->atlasPageCount, sizeof(uint8_t));
+    } else {
+        memset(renderer->battleAtlasPrefetchMask, 0, (size_t) renderer->atlasPageCount * sizeof(uint8_t));
+    }
+    if (renderer->battleAtlasPrefetchPages == NULL) {
+        renderer->battleAtlasPrefetchPages = safeCalloc(renderer->atlasPageCount, sizeof(uint32_t));
+    }
+
+    renderer->battleAtlasPrefetchPageCount = 0;
+    renderer->battleAtlasPrefetchPageCursor = 0;
+    renderer->battleAtlasPrefetchPrepared = true;
+
+    DataWin* dw = renderer->base.dataWin;
+    int32_t roomIndex = renderer->battleTransitionRoomIndex;
+    if (roomIndex >= 0 && (uint32_t) roomIndex < dw->room.count) {
+        const N3DSRoomManifestEntry* manifest =
+            N3DSRenderer_findRoomManifestEntry(renderer, (uint32_t) roomIndex);
+        if (manifest != NULL &&
+            manifest->pageStart <= renderer->roomManifestPageRefCount &&
+            manifest->pageCount <= renderer->roomManifestPageRefCount - manifest->pageStart) {
+            repeat(manifest->pageCount, pageOffset) {
+                uint32_t refIndex = manifest->pageStart + (uint32_t) pageOffset;
+                N3DSRenderer_addBattleAtlasPrefetchPage(
+                    renderer,
+                    renderer->roomManifestPageRefs[refIndex].pageIndex
+                );
+            }
+        }
+
+        Room* room = &dw->room.rooms[roomIndex];
+        if (room->payloadLoaded) {
+            if (room->backgrounds != NULL) {
+                repeat(8, backgroundIndex) {
+                    RoomBackground* background = &room->backgrounds[backgroundIndex];
+                    if (!background->enabled || background->backgroundDefinition < 0) continue;
+                    N3DSRenderer_addBattleAtlasPrefetchTPAG(
+                        renderer,
+                        Renderer_resolveBackgroundTPAGIndex(dw, background->backgroundDefinition)
+                    );
+                }
+            }
+
+            repeat(room->layerCount, layerIndex) {
+                RoomLayer* layer = &room->layers[layerIndex];
+                if (layer->backgroundData != NULL && layer->backgroundData->visible) {
+                    N3DSRenderer_addBattleAtlasPrefetchSprite(renderer, layer->backgroundData->spriteIndex);
+                }
+                if (layer->assetsData != NULL) {
+                    repeat(layer->assetsData->legacyTileCount, tileIndex) {
+                        N3DSTileAtlasEntry* entry =
+                            N3DSRenderer_findTileEntry(renderer, &layer->assetsData->legacyTiles[tileIndex]);
+                        N3DSRenderer_addBattleAtlasPrefetchTileEntry(renderer, entry);
+                    }
+                    repeat(layer->assetsData->spriteCount, spriteIndex) {
+                        N3DSRenderer_addBattleAtlasPrefetchSprite(
+                            renderer,
+                            layer->assetsData->sprites[spriteIndex].spriteIndex
+                        );
+                    }
+                }
+                if (layer->tilesData != NULL && layer->tilesData->backgroundIndex >= 0) {
+                    N3DSRenderer_addBattleAtlasPrefetchTPAG(
+                        renderer,
+                        Renderer_resolveBackgroundTPAGIndex(dw, layer->tilesData->backgroundIndex)
+                    );
+                }
+            }
+
+            repeat(room->tileCount, tileIndex) {
+                N3DSRenderer_addBattleAtlasPrefetchTileEntry(
+                    renderer,
+                    N3DSRenderer_findTileEntry(renderer, &room->tiles[tileIndex])
+                );
+            }
+
+            repeat(room->gameObjectCount, objectIndex) {
+                int32_t objectDefinition = room->gameObjects[objectIndex].objectDefinition;
+                if (objectDefinition < 0 || (uint32_t) objectDefinition >= dw->objt.count) continue;
+                N3DSRenderer_addBattleAtlasPrefetchSprite(
+                    renderer,
+                    dw->objt.objects[objectDefinition].spriteId
+                );
+            }
+        }
+    }
+
+    static const char* const kBattleCommonAtlasSprites[] = {
+        "spr_battlebg",
+        "spr_heartsmall",
+        "spr_blconsm",
+        "spr_dmgnum_o",
+    };
+    repeat(sizeof(kBattleCommonAtlasSprites) / sizeof(kBattleCommonAtlasSprites[0]), nameIndex) {
+        N3DSRenderer_addBattleAtlasPrefetchSprite(
+            renderer,
+            N3DSRenderer_findSpriteIndexByName(dw, kBattleCommonAtlasSprites[nameIndex])
+        );
+    }
+}
+
+static void N3DSRenderer_resetBattleAtlasPrefetch(N3DSRenderer* renderer) {
+    if (renderer == NULL) return;
+    N3DSRenderer_cancelBattleAtlasPrefetchJob(renderer);
+    renderer->battleAtlasPrefetchPageCount = 0;
+    renderer->battleAtlasPrefetchPageCursor = 0;
+    renderer->battleAtlasPrefetchPrepared = false;
+    if (renderer->battleAtlasPrefetchMask != NULL && renderer->atlasPageCount > 0) {
+        memset(renderer->battleAtlasPrefetchMask, 0, (size_t) renderer->atlasPageCount * sizeof(uint8_t));
+    }
+}
+
+static bool N3DSRenderer_tickBattleAtlasPrefetch(
+    N3DSRenderer* renderer,
+    AudioSystem* audioSystem,
+    N3DSBattlePrewarmTickDiag* diag
+) {
+    if (renderer == NULL || audioSystem == NULL ||
+        !N3DSRenderer_isPackedAtlasVersion(renderer->atlasVersion) ||
+        renderer->packedAtlasPath[0] == '\0') {
+        return true;
+    }
+
+    if (!renderer->battleAtlasPrefetchPrepared) {
+        N3DSRenderer_prepareBattleAtlasPrefetchPages(renderer);
+    }
+
+    N3DSAtlasPrefetchJob* job = &renderer->battleAtlasPrefetch;
+    if (job->active) {
+        N3DSAudioWorkerReadStatus status;
+        if (job->audioSystem == NULL || job->workerRequestId == 0 ||
+            !N3DSAudioSystem_getWorkerReadStatus(job->audioSystem, job->workerRequestId, &status)) {
+            N3DSRenderer_cancelBattleAtlasPrefetchJob(renderer);
+            return false;
+        }
+
+        uint32_t byteDelta = status.bytesRead >= job->bytesRead ? status.bytesRead - job->bytesRead : 0;
+        uint32_t chunkDelta = status.chunksRead >= job->workerChunksRead ? status.chunksRead - job->workerChunksRead : 0;
+        job->bytesRead = status.bytesRead;
+        job->workerChunksRead = status.chunksRead;
+        if (diag != NULL) {
+            diag->chunksReadThisTick += chunkDelta;
+            diag->bytesReadThisTick += byteDelta;
+            diag->jobBytesCompleted = status.bytesRead;
+            diag->jobBytesTotal = status.totalBytes;
+        }
+
+        if (!status.ready) return false;
+
+        uint8_t* data = NULL;
+        uint32_t dataSize = 0;
+        if (!N3DSAudioSystem_takeWorkerRead(
+                job->audioSystem,
+                job->workerRequestId,
+                &data,
+                &dataSize)) {
+            free(data);
+            memset(job, 0, sizeof(*job));
+        } else {
+            (void) N3DSRenderer_publishBattleAtlasPrefetchJob(renderer, data, dataSize);
+        }
+    }
+
+    while (renderer->battleAtlasPrefetchPageCursor < renderer->battleAtlasPrefetchPageCount) {
+        uint32_t pageIndex =
+            renderer->battleAtlasPrefetchPages[renderer->battleAtlasPrefetchPageCursor++];
+        if (pageIndex >= renderer->atlasPageCount) continue;
+
+        N3DSLoadedAtlasPage* page = &renderer->atlasPages[pageIndex];
+        if (page->t3xData != NULL && page->t3xSize > 0) {
+            page->blobLastUsedStamp = ++renderer->blobUseCounter;
+            continue;
+        }
+        if (page->dataSize == 0) continue;
+
+        uint32_t requestId = N3DSAudioSystem_beginWorkerRead(
+            audioSystem,
+            renderer->packedAtlasPath,
+            page->dataOffset,
+            page->dataSize
+        );
+        if (requestId == 0) {
+            renderer->battleAtlasPrefetchPageCursor--;
+            return false;
+        }
+
+        memset(job, 0, sizeof(*job));
+        job->audioSystem = audioSystem;
+        job->pageIndex = pageIndex;
+        job->dataSize = page->dataSize;
+        job->workerRequestId = requestId;
+        job->active = true;
+        if (diag != NULL) {
+            diag->jobBytesCompleted = 0;
+            diag->jobBytesTotal = page->dataSize;
+        }
+        return false;
+    }
+
+    return true;
+}
+
 static void N3DSRenderer_prewarmRoomBlobCache(N3DSRenderer* renderer, Runner* runner) {
     if (renderer == NULL || runner == NULL || runner->currentRoom == NULL || renderer->atlasPageCount == 0) return;
 
@@ -4387,6 +4762,9 @@ static void N3DSRenderer_captureBattlePrewarmTransitionEndDiag(N3DSRenderer* ren
     if (renderer->battleDirectPrefetch.active) {
         diag->jobBytesCompleted = renderer->battleDirectPrefetch.bytesRead;
         diag->jobBytesTotal = renderer->battleDirectPrefetch.dataSize;
+    } else if (renderer->battleAtlasPrefetch.active) {
+        diag->jobBytesCompleted = renderer->battleAtlasPrefetch.bytesRead;
+        diag->jobBytesTotal = renderer->battleAtlasPrefetch.dataSize;
     }
 }
 
@@ -4398,6 +4776,7 @@ bool N3DSRenderer_tickBattlePrewarm(Renderer* base, Runner* runner) {
     if (N3DSRenderer_isUndertaleBattleRoom(renderer, runner)) {
         if (runner->frameRoomTransitioned) N3DSRenderer_captureBattlePrewarmTransitionEndDiag(renderer);
         N3DSRenderer_cancelDirectPrefetchJob(renderer);
+        N3DSRenderer_resetBattleAtlasPrefetch(renderer);
         N3DSRenderer_prewarmLiveJapaneseDirectFontBlobs(renderer, runner);
         return false;
     }
@@ -4406,6 +4785,7 @@ bool N3DSRenderer_tickBattlePrewarm(Renderer* base, Runner* runner) {
     if (targetKind == N3DS_BATTLE_PREWARM_TARGET_NONE) {
         if (runner->frameRoomTransitioned) N3DSRenderer_captureBattlePrewarmTransitionEndDiag(renderer);
         N3DSRenderer_cancelDirectPrefetchJob(renderer);
+        N3DSRenderer_resetBattleAtlasPrefetch(renderer);
         renderer->battleTransitionPrewarmSeen = false;
         renderer->battleTransitionPrewarmStage = 0;
         renderer->battleTransitionManifestOffset = 0;
@@ -4417,6 +4797,7 @@ bool N3DSRenderer_tickBattlePrewarm(Renderer* base, Runner* runner) {
 
     if (!renderer->battleTransitionPrewarmSeen) {
         N3DSRenderer_cancelDirectPrefetchJob(renderer);
+        N3DSRenderer_resetBattleAtlasPrefetch(renderer);
         renderer->battleTransitionPrewarmSeen = true;
         renderer->battleTransitionPrewarmStage = 0;
         renderer->battleTransitionManifestOffset = 0;
@@ -4424,6 +4805,7 @@ bool N3DSRenderer_tickBattlePrewarm(Renderer* base, Runner* runner) {
         renderer->battleTransitionRoomIndex = N3DSRenderer_findBattleTransitionTargetRoomIndex(renderer, targetKind);
         N3DSRenderer_resetBattleTransitionManifestDiag(renderer);
     } else if (renderer->battleTransitionTargetKind != targetKind) {
+        N3DSRenderer_resetBattleAtlasPrefetch(renderer);
         renderer->battleTransitionTargetKind = targetKind;
         renderer->battleTransitionRoomIndex = N3DSRenderer_findBattleTransitionTargetRoomIndex(renderer, targetKind);
         renderer->battleTransitionManifestOffset = 0;
@@ -4445,6 +4827,8 @@ bool N3DSRenderer_tickBattlePrewarm(Renderer* base, Runner* runner) {
     const uint32_t spriteStageCount = (uint32_t) (sizeof(kN3DSBattleDirectSpriteNames) / sizeof(kN3DSBattleDirectSpriteNames[0]));
     const uint32_t fontStageCount = (uint32_t) (sizeof(kN3DSBattleJapaneseCommonFontNames) / sizeof(kN3DSBattleJapaneseCommonFontNames[0]));
     const uint32_t directStageCount = spriteStageCount + fontStageCount;
+    const uint32_t atlasStage = directStageCount;
+    const uint32_t manifestStage = directStageCount + 1u;
 
     N3DSDirectPrefetchTickBudget budget;
     memset(&budget, 0, sizeof(budget));
@@ -4487,7 +4871,18 @@ bool N3DSRenderer_tickBattlePrewarm(Renderer* base, Runner* runner) {
     if (renderer->battleTransitionPrewarmStage < directStageCount) return true;
     if (diag->bytesReadThisTick > 0) return true;
 
-    diag->assetStage = (int32_t) directStageCount;
+    if (renderer->battleTransitionPrewarmStage == atlasStage) {
+        diag->assetStage = (int32_t) atlasStage;
+        if (!N3DSRenderer_tickBattleAtlasPrefetch(renderer, runner->audioSystem, diag)) {
+            diag->stageEnd = (int32_t) atlasStage;
+            return true;
+        }
+        renderer->battleTransitionPrewarmStage = manifestStage;
+        diag->stageEnd = (int32_t) manifestStage;
+        if (diag->bytesReadThisTick > 0) return true;
+    }
+
+    diag->assetStage = (int32_t) manifestStage;
     if (renderer->battleTransitionRoomIndex < 0) return true;
     if (!N3DSRenderer_prewarmBattleRoomManifestNextBlob(renderer)) {
         renderer->battleTransitionPrewarmStage = UINT32_MAX;
@@ -4672,6 +5067,7 @@ static void N3DSRenderer_destroy(Renderer* base) {
     }
     N3DSRenderer* renderer = (N3DSRenderer*) base;
     N3DSRenderer_cancelDirectPrefetchJob(renderer);
+    N3DSRenderer_cancelBattleAtlasPrefetchJob(renderer);
     repeat(renderer->atlasPageCount, i) {
         N3DSRenderer_unloadPage(renderer, (uint32_t) i);
         N3DSRenderer_unloadPageBlob(renderer, (uint32_t) i);
@@ -4684,6 +5080,8 @@ static void N3DSRenderer_destroy(Renderer* base) {
     shfree(renderer->packedDirectAssetMap);
     free(renderer->roomManifestEntries);
     free(renderer->roomManifestPageRefs);
+    free(renderer->battleAtlasPrefetchMask);
+    free(renderer->battleAtlasPrefetchPages);
     free(renderer->atlasTraceMask);
     if (renderer->atlasTraceFile != NULL) fclose(renderer->atlasTraceFile);
     if (renderer->packedAtlasFile != NULL) fclose(renderer->packedAtlasFile);
