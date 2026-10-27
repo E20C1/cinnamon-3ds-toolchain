@@ -28,7 +28,8 @@
 #define N3DS_DUST_PERF_MAX_FRAMES 64u
 #define N3DS_PERF_IMPORT_PAGE_CAP 16u
 #define N3DS_PERF_PENDING_EVENT_CAP 2u
-#define N3DS_DUST_PERF_LOG_PATH "sdmc:/3ds/cinnamon/battle_exit_perf.log"
+#define N3DS_BATTLE_ENTRY_POST_FRAMES 4u
+#define N3DS_DUST_PERF_LOG_PATH "sdmc:/3ds/cinnamon/battle_entry_perf.log"
 
 void N3DS_tryTriggerAsrielLed(Runner* runner);
 
@@ -226,6 +227,7 @@ typedef struct {
 } N3DSDustPerfSampler;
 
 static N3DSDustPerfSampler gN3DSBattleExitPerfSampler;
+static N3DSDustPerfSampler gN3DSBattleEntryPerfSampler;
 
 typedef struct {
     N3DSDustPerfSampler sampler;
@@ -1504,7 +1506,7 @@ static void N3DSPerf_flushQueuedEvents(Runner* runner) {
     gN3DSPerfPendingEventCount = 0;
 }
 
-static bool N3DSBattleExitPerf_isBattleRoomIndex(Runner* runner, int32_t roomIndex) {
+static bool N3DSBattlePerf_isBattleRoomIndex(Runner* runner, int32_t roomIndex) {
     if (runner == NULL || runner->dataWin == NULL || roomIndex < 0 ||
         (uint32_t) roomIndex >= runner->dataWin->room.count) {
         return false;
@@ -1536,8 +1538,8 @@ static void N3DSBattleExitPerf_update(
     N3DSDustPerfFrame sample = *captured;
     bool exitedBattle =
         sample.roomTransitioned != 0 &&
-        N3DSBattleExitPerf_isBattleRoomIndex(runner, sample.roomFromIndex) &&
-        !N3DSBattleExitPerf_isBattleRoomIndex(runner, sample.roomToIndex);
+        N3DSBattlePerf_isBattleRoomIndex(runner, sample.roomFromIndex) &&
+        !N3DSBattlePerf_isBattleRoomIndex(runner, sample.roomToIndex);
 
     if (!sampler->active) {
         if (!exitedBattle) {
@@ -1575,6 +1577,77 @@ static void N3DSBattleExitPerf_flushPending(N3DSDustPerfSampler* sampler) {
     if (sampler == NULL || !sampler->active || sampler->sampleCount == 0) return;
     N3DSPerf_queueEvent(sampler, "battle_exit", "exit");
     N3DSBattleExitPerf_reset(sampler);
+}
+
+static void N3DSBattleEntryPerf_reset(N3DSDustPerfSampler* sampler) {
+    if (sampler == NULL) return;
+    sampler->active = false;
+    sampler->truncated = false;
+    sampler->postFramesRemaining = 0;
+    sampler->sampleCount = 0;
+    sampler->preCount = 0;
+    sampler->preWrite = 0;
+}
+
+static void N3DSBattleEntryPerf_update(
+    N3DSDustPerfSampler* sampler,
+    Runner* runner,
+    const N3DSDustPerfFrame* captured
+) {
+    if (sampler == NULL || runner == NULL || captured == NULL) return;
+
+    N3DSDustPerfFrame sample = *captured;
+    bool transitionActive = sample.battleTransitionPrewarmActive != 0;
+    bool enteredBattle =
+        sample.roomTransitioned != 0 &&
+        N3DSBattlePerf_isBattleRoomIndex(runner, sample.roomToIndex);
+
+    if (!sampler->active) {
+        if (!enteredBattle) {
+            if (transitionActive) {
+                // Keep only the frames immediately preceding room entry. This
+                // preserves worker/prefetch state at the boundary without
+                // growing the capture across a long transition animation.
+                N3DSDustPerf_pushPreFrame(sampler, &sample);
+            } else {
+                // The transition was cancelled or redirected before reaching a
+                // battle room; do not leak stale pre-frames into the next encounter.
+                sampler->preCount = 0;
+                sampler->preWrite = 0;
+            }
+            return;
+        }
+
+        sampler->active = true;
+        sampler->truncated = false;
+        sampler->sampleCount = 0;
+        sampler->postFramesRemaining = N3DS_BATTLE_ENTRY_POST_FRAMES;
+        sampler->eventId++;
+        N3DSDustPerf_copyPreFrames(sampler);
+        sample.phase = 1;
+        N3DSDustPerf_appendSample(sampler, &sample);
+        return;
+    }
+
+    sample.phase = 0;
+    N3DSDustPerf_appendSample(sampler, &sample);
+    if (sampler->truncated) {
+        N3DSPerf_queueEvent(sampler, "battle_entry", "entry");
+        N3DSBattleEntryPerf_reset(sampler);
+        return;
+    }
+
+    if (sampler->postFramesRemaining > 0) sampler->postFramesRemaining--;
+    if (sampler->postFramesRemaining > 0) return;
+
+    N3DSPerf_queueEvent(sampler, "battle_entry", "entry");
+    N3DSBattleEntryPerf_reset(sampler);
+}
+
+static void N3DSBattleEntryPerf_flushPending(N3DSDustPerfSampler* sampler) {
+    if (sampler == NULL || !sampler->active || sampler->sampleCount == 0) return;
+    N3DSPerf_queueEvent(sampler, "battle_entry", "entry");
+    N3DSBattleEntryPerf_reset(sampler);
 }
 
 static void N3DSDebugMonitor_init(N3DSDebugMonitor* monitor) {
@@ -2590,10 +2663,34 @@ int main(int argc, char** argv) {
         renderPerf.c3dProcessingMs = (double) C3D_GetProcessingTime();
         renderPerf.totalMs = N3DSPerf_ticksToMs(svcGetSystemTick() - renderStartTick);
 
+        bool battleEntryPerfNeeded =
+            battleTransitionPrewarmActive ||
+            gN3DSBattleEntryPerfSampler.active ||
+            gN3DSBattleEntryPerfSampler.preCount > 0 ||
+            (runner->frameRoomTransitioned &&
+             N3DSBattlePerf_isBattleRoomIndex(runner, runner->frameRoomTransitionTo));
+        if (battleEntryPerfNeeded) {
+            N3DSDustPerfFrame perfSample = N3DSDustPerf_captureFrame(
+                runner,
+                renderer,
+                frameStepMs,
+                battlePrewarmTickMs,
+                battleTransitionPrewarmActive,
+                &renderPerf
+            );
+            N3DSBattleEntryPerf_update(&gN3DSBattleEntryPerfSampler, runner, &perfSample);
+        }
+
         N3DSDebugMonitor_tickFrame(&debugMonitor, renderPerf.totalMs);
         RunnerKeyboard_beginFrame(runner->keyboard);
         if (touchState.tapPulseFrames > 0u) touchState.tapPulseFrames--;
     }
+
+    // Keep SD writes completely outside the measured battle-entry path. A
+    // completed event stays in RAM until shutdown; an in-progress event is
+    // queued here as a partial capture before the runner metadata disappears.
+    N3DSBattleEntryPerf_flushPending(&gN3DSBattleEntryPerfSampler);
+    N3DSPerf_flushQueuedEvents(runner);
 
     renderer->vtable->destroy(renderer);
     audioSystem->vtable->destroy(audioSystem);
