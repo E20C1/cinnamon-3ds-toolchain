@@ -458,6 +458,7 @@ typedef struct N3DSRenderer {
     uint32_t* battleAtlasPrefetchPages;
     uint32_t battleAtlasPrefetchPageCount;
     uint32_t battleAtlasPrefetchPageCursor;
+    uint32_t battleAtlasGpuPrewarmCursor;
     bool battleAtlasPrefetchPrepared;
     N3DSBattlePrewarmTickDiag lastBattlePrewarmTickDiag;
     bool battleTransitionManifestLoaded;
@@ -4522,6 +4523,7 @@ static void N3DSRenderer_prepareBattleAtlasPrefetchPages(
 
     renderer->battleAtlasPrefetchPageCount = 0;
     renderer->battleAtlasPrefetchPageCursor = 0;
+    renderer->battleAtlasGpuPrewarmCursor = 0;
     renderer->battleAtlasPrefetchPrepared = true;
 
     DataWin* dw = renderer->base.dataWin;
@@ -4683,6 +4685,7 @@ static void N3DSRenderer_resetBattleAtlasPrefetch(N3DSRenderer* renderer) {
     N3DSRenderer_cancelBattleAtlasPrefetchJob(renderer);
     renderer->battleAtlasPrefetchPageCount = 0;
     renderer->battleAtlasPrefetchPageCursor = 0;
+    renderer->battleAtlasGpuPrewarmCursor = 0;
     renderer->battleAtlasPrefetchPrepared = false;
     if (renderer->battleAtlasPrefetchMask != NULL && renderer->atlasPageCount > 0) {
         memset(renderer->battleAtlasPrefetchMask, 0, (size_t) renderer->atlasPageCount * sizeof(uint8_t));
@@ -4778,6 +4781,58 @@ static bool N3DSRenderer_tickBattleAtlasPrefetch(
     }
 
     return true;
+}
+
+static void N3DSRenderer_tickBattleAtlasGpuPrewarm(N3DSRenderer* renderer) {
+    if (renderer == NULL ||
+        !renderer->battleTransitionPrewarmSeen ||
+        !renderer->battleAtlasPrefetchPrepared ||
+        renderer->battleAtlasPrefetchPages == NULL) {
+        return;
+    }
+
+    while (renderer->battleAtlasGpuPrewarmCursor < renderer->battleAtlasPrefetchPageCount) {
+        uint32_t queueIndex = renderer->battleAtlasGpuPrewarmCursor;
+        uint32_t pageIndex = renderer->battleAtlasPrefetchPages[queueIndex];
+        if (pageIndex >= renderer->atlasPageCount) {
+            renderer->battleAtlasGpuPrewarmCursor++;
+            continue;
+        }
+
+        N3DSLoadedAtlasPage* page = &renderer->atlasPages[pageIndex];
+        if (page->ready) {
+            renderer->battleAtlasGpuPrewarmCursor++;
+            continue;
+        }
+        if (page->dataSize == 0) {
+            renderer->battleAtlasGpuPrewarmCursor++;
+            continue;
+        }
+
+        if (page->t3xData == NULL || page->t3xSize == 0) {
+            bool workerReadingPage =
+                renderer->battleAtlasPrefetch.active &&
+                renderer->battleAtlasPrefetch.pageIndex == pageIndex;
+            bool workerPassedPage =
+                renderer->battleAtlasPrefetchPageCursor > queueIndex;
+            if (workerReadingPage || !workerPassedPage) {
+                return;
+            }
+
+            // Never fall back to synchronous atlas I/O from the render thread.
+            // If the worker already passed this page and its blob is no longer
+            // resident, leave first-use loading to the ordinary draw path and
+            // keep the remaining prewarm queue moving.
+            renderer->battleAtlasGpuPrewarmCursor++;
+            continue;
+        }
+
+        // Import at most one atlas page per frame. ensurePageLoaded keeps the
+        // existing resident-page and byte budgets, including LRU eviction.
+        (void) N3DSRenderer_ensurePageLoaded(renderer, pageIndex);
+        renderer->battleAtlasGpuPrewarmCursor++;
+        return;
+    }
 }
 
 static void N3DSRenderer_prewarmRoomBlobCache(N3DSRenderer* renderer, Runner* runner) {
@@ -5305,6 +5360,7 @@ static void N3DSRenderer_beginFrame(Renderer* base, int32_t gameW, int32_t gameH
     renderer->activeSceneTarget = N3DS_SCENE_TARGET_NONE;
     N3DSRenderer_resetFramePerfCounters(renderer);
     N3DSRenderer_computeFrameLayout(renderer, gameW, gameH);
+    N3DSRenderer_tickBattleAtlasGpuPrewarm(renderer);
 
     if (renderer->pendingOld3DSAtlasFlush && !renderer->isNew3DS) {
         renderer->pendingOld3DSAtlasFlush = false;
