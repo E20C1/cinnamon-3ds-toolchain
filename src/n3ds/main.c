@@ -2591,28 +2591,9 @@ int main(int argc, char** argv) {
         renderPerf.totalMs = N3DSPerf_ticksToMs(svcGetSystemTick() - renderStartTick);
 
         N3DSDebugMonitor_tickFrame(&debugMonitor, renderPerf.totalMs);
-        N3DSDustPerfFrame perfSample = N3DSDustPerf_captureFrame(
-            runner,
-            renderer,
-            frameStepMs,
-            battlePrewarmTickMs,
-            battleTransitionPrewarmActive,
-            &renderPerf
-        );
-        // Perf logging is intentionally scoped to battle-room exits only.
-        // Keep a short rolling pre-window in RAM, then write after the return
-        // transition and its post frames have completed.
-        N3DSBattleExitPerf_update(&gN3DSBattleExitPerfSampler, runner, &perfSample);
-        if (!gN3DSBattleExitPerfSampler.active) {
-            N3DSPerf_flushQueuedEvents(runner);
-        }
-
         RunnerKeyboard_beginFrame(runner->keyboard);
         if (touchState.tapPulseFrames > 0u) touchState.tapPulseFrames--;
     }
-
-    N3DSBattleExitPerf_flushPending(&gN3DSBattleExitPerfSampler);
-    N3DSPerf_flushQueuedEvents(runner);
 
     renderer->vtable->destroy(renderer);
     audioSystem->vtable->destroy(audioSystem);
